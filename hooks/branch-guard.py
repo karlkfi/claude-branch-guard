@@ -44,7 +44,13 @@ ASSIGNMENT_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 # Operator-run tokens that separate one simple command from the next.
 SEPARATORS = {'|', '||', '&&', '&', ';', '\n', '(', ')'}
 # Redirect operators; the following token is a target, not part of a command.
-REDIR = {'>', '>>', '<', '<<', '<<<', '>|', '&>', '&>>'}
+# Includes the fd-duplication forms (`>&`/`<&`, as in `2>&1`); shlex's
+# punctuation grouping lexes `2>&1` as the three tokens `2`, `>&`, `1`.
+REDIR = {'>', '>>', '<', '<<', '<<<', '>|', '&>', '&>>', '>&', '<&'}
+# Redirect operators that can take a leading fd-number prefix (`2>`, `0<&3`).
+# Excludes `&>`/`&>>`, where the `&` already means both stdout+stderr and bash
+# forbids an fd prefix — so a digit before them is a real argument, not an fd.
+FD_PREFIX_REDIR = REDIR - {'&>', '&>>'}
 # Every char shlex treats as punctuation (matches the tokenizer below).
 PUNCT_CHARS = frozenset(';()<>|&\n')
 
@@ -208,6 +214,15 @@ def command_segments(tokens):
             i += 1
             continue
         if t in REDIR:
+            # A bash fd prefix (`2>&1`, `1>out`, `0<in`) lexes as a separate
+            # leading digit token immediately before the redirect operator; drop
+            # it so it isn't read as a command positional (`git push origin HEAD
+            # 2>&1` must not see `2` as a refspec). Restricted to a SINGLE digit
+            # so a numeric branch name (`git push origin 123 >log`) isn't
+            # mistaken for an fd, and only for operators that accept an fd prefix
+            # (not `&>`/`&>>`, where a leading digit is a real argument).
+            if t in FD_PREFIX_REDIR and cur and len(cur[-1]) == 1 and cur[-1].isdigit():
+                cur.pop()
             i += 2 if i + 1 < len(tokens) else 1   # drop operator + its target
             continue
         cur.append(t)

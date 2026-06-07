@@ -356,5 +356,39 @@ check "git status | tee out -> none" none \
 check "git log | head; rm -rf x -> none" none \
   "$(decision_for "$(bash_cmd 'git log | head ; rm -rf x')" "$WORK")"
 
+# ---------------------------------------------------------------------------
+# 20. fd redirects (`2>&1`, `2>/dev/null`, `1>out`). shlex lexes `2>&1` as the
+#     three tokens `2`, `>&`, `1`; the segmenter must recognize `>&`/`<&` as
+#     redirect operators AND drop the single-digit fd prefix, so the redirect
+#     isn't read as command positionals (the bug: `2` looked like a refspec).
+check "git push origin HEAD 2>&1 | tail -5 -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git push -u origin HEAD 2>&1 | tail -5')" "$WORK")"
+check "git status 2>&1 -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git status 2>&1')" "$WORK")"
+check "git log 2>/dev/null -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git log 2>/dev/null')" "$WORK")"
+check "git log 1>out 2>err -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git log 1>out 2>err')" "$WORK")"
+# `>&2` with no fd prefix means redirect stdout to stderr — no positional dropped.
+check "git push origin HEAD >&2 -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git push origin HEAD >&2')" "$WORK")"
+# A multi-digit numeric branch name is NOT an fd prefix; it stays a refspec, so
+# pushing it (not the worktree branch) still asks under the strict policy.
+check "git push origin 123 >log (branch, not fd) -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git push origin 123 >log')" "$WORK")"
+# `&>`/`&>>` can't take an fd prefix in bash, so a single digit before them is a
+# real argument (refspec), not an fd — pushing branch `2` still asks.
+check "git push origin 2 &>log (branch, not fd) -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git push origin 2 &>log')" "$WORK")"
+# But a single-digit fd before an fd-accepting operator IS dropped (&>1 here is
+# the &> redirect to a file named 1; the redirect to /dev/null is the common form).
+check "git log &>/dev/null -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git log &>/dev/null')" "$WORK")"
+# A redirect doesn't weaken a protective ask.
+check "git push origin main 2>&1 -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git push origin main 2>&1')" "$WORK")"
+check "git reset --hard 2>&1 -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git reset --hard 2>&1')" "$WORK")"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]

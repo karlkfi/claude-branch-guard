@@ -228,7 +228,9 @@ reinstall **branch-guard** from it.
    grouping) so quotes are respected and shell operators (`|`, `&&`, `>`, `;`,
    newlines) become their own tokens.
 2. **Split** into simple-command segments on those operators and drop redirect
-   targets aside.
+   targets aside, including fd-redirect forms (`git push … 2>&1`,
+   `git log 2>/dev/null`) — the leading fd digit and the operator's target are
+   both stripped so they aren't read as command arguments.
 3. **Parse** each segment with `parse_invocation`: strip leading
    `NAME=VALUE` env prefixes (`GIT_AUTHOR_NAME=x git …`) and program global
    options (`git -C path`, `-c k=v`) to find the `git`/`gh` subcommand and its
