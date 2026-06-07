@@ -84,6 +84,43 @@ READONLY_GH = frozenset({
     ('status', ''),
 })
 
+# Pure read-only "filter" programs — pagers/formatters that read stdin (or a
+# file) and write only to stdout. A segment running one of these is safe to ride
+# along AFTER a recognized-safe git/gh segment in a pipe (`git log | head -20`)
+# without dropping the whole command from `allow` to `defer`. Curated to a set
+# with no file-writing or code-running behavior when invoked with no positional
+# argument. Deliberately EXCLUDES sed/awk (write via `-i` / `>` or run code),
+# tr (no write but easy to confuse), and tee/dd (write by definition).
+SAFE_READ_FILTERS = frozenset({
+    'head', 'tail', 'cat', 'wc', 'nl', 'sort', 'uniq', 'cut', 'column',
+    'less', 'more',
+})
+
+# Per-program filter options that consume a SEPARATE following value token, so
+# the value (`tail -n 5`) isn't mistaken for a disqualifying file positional.
+# Missing an option here only makes a form defer (safe), never allow — so these
+# cover common usage rather than every flag. `--opt=value` is one token and
+# needs no entry. sort's `-o`/`--output` is intentionally absent: it WRITES a
+# file and is rejected by FILTER_WRITE_OPT_RE instead.
+FILTER_VALUE_OPTS = {
+    'head':   {'-n', '-c'},
+    'tail':   {'-n', '-c'},
+    'cut':    {'-f', '-d', '-c', '-b'},
+    'sort':   {'-k', '-t', '-S', '-T'},
+    'uniq':   {'-f', '-s', '-w'},
+    'nl':     {'-w', '-s', '-b', '-v'},
+    'column': {'-s', '-c'},
+}
+
+# Filter options that make the program WRITE to a file — their presence
+# disqualifies the segment (it defers). Currently only sort's output option,
+# including its attached forms (`-o file`, `-ofile`, `--output file`,
+# `--output=file`). The separate-token form is already caught by the
+# no-positional rule; this regex additionally catches the attached forms that
+# would otherwise look like a single harmless flag. Tightened so it doesn't
+# swallow cut's read-only `--output-delimiter`.
+FILTER_WRITE_OPT_RE = re.compile(r'^(-o|--output(=|$))')
+
 # `git push` options that consume a separate following value token.
 PUSH_VALUE_OPTS = {'--repo', '-o', '--push-option', '--receive-pack', '--exec'}
 # `git push` flags that push more than the current branch.
@@ -207,6 +244,47 @@ def parse_invocation(tokens):
     sub = tokens[i] if i < len(tokens) else None
     args = tokens[i + 1:] if i < len(tokens) else []
     return {'prog': prog, 'sub': sub, 'args': args, 'globals': tokens[start:i]}
+
+
+def is_safe_read_filter(tokens):
+    """True if a non-git segment is a pure read-only filter (a pager/formatter
+    like `head`/`tail`/`wc`) safe to ride along after a recognized-safe git/gh
+    segment in a pipe (`git log | head -20`). Requires the program (after
+    stripping a leading path and any env prefix, like `parse_invocation`) to be
+    in SAFE_READ_FILTERS and the segment to have NO non-flag positional argument
+    — so it consumes stdin, not a file. `head`, `head -20`, `wc -l`, `tail -n 5`
+    qualify; `cat file`, `sort big.txt` (read a file — workspace-guard's domain)
+    and `sort -ofile` (writes a file) do not. Value-consuming options
+    (`tail -n 5`) are accounted for so their value isn't read as a positional;
+    a write option (`sort -o`) disqualifies. Fails safe: any token it can't
+    prove is stdin-only makes the segment defer rather than allow."""
+    i = 0
+    while i < len(tokens) and ASSIGNMENT_RE.match(tokens[i]):
+        i += 1
+    if i >= len(tokens):
+        return False
+    prog = tokens[i].rsplit('/', 1)[-1]
+    if prog not in SAFE_READ_FILTERS:
+        return False
+    value_opts = FILTER_VALUE_OPTS.get(prog, frozenset())
+    args = tokens[i + 1:]
+    j = 0
+    while j < len(args):
+        t = args[j]
+        if t == '--':
+            # Everything after `--` is a positional (a file path); only a bare
+            # trailing `--` is acceptable.
+            return j == len(args) - 1
+        if t == '-':
+            j += 1                       # bare `-` means stdin, not a file
+            continue
+        if t.startswith('-'):
+            if FILTER_WRITE_OPT_RE.match(t):
+                return False             # writes a file (e.g. sort -o) -> defer
+            j += 2 if t in value_opts else 1
+            continue
+        return False                     # a non-flag positional (file path)
+    return True
 
 
 def ref_to_branch(ref, current):
@@ -512,16 +590,28 @@ def main():
 
         policy = push_policy()
         branch = current_branch(data.get('cwd') or os.getcwd())
-        verdicts = [classify_segment(inv, branch, policy) for inv in invs]
+        verdicts = []
+        for seg, inv in zip(segments, invs):
+            if inv is None:
+                # A non-git segment rides along only if it's a pure read-only
+                # filter (`git log | head`); otherwise it's `nongit` and the
+                # command can't be auto-approved. `not any(invs)` above already
+                # guaranteed at least one git/gh segment, so a filter-only
+                # command (`head -5`) defers rather than allows.
+                verdicts.append(('filter', None) if is_safe_read_filter(seg)
+                                else ('nongit', None))
+            else:
+                verdicts.append(classify_segment(inv, branch, policy))
 
         # A protective ask wins over everything (and becomes deny when no human
         # is present). Otherwise the command is auto-approved only when EVERY
-        # segment is recognized-safe, so a non-git command can't ride along.
+        # segment is recognized-safe — a git/gh `allow` or a safe read filter —
+        # so a non-git, non-filter command can't ride along.
         for verdict, reason in verdicts:
             if verdict == 'ask':
                 confirm(reason, mode)
                 return
-        if all(verdict == 'allow' for verdict, _ in verdicts):
+        if all(verdict in ('allow', 'filter') for verdict, _ in verdicts):
             # A hidden command substitution / process substitution / unrecognized
             # operator would run code the classifier never saw, so it can't ride
             # along into an auto-approve — defer (the protective `ask` above is

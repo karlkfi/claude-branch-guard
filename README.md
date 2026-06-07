@@ -52,7 +52,10 @@ It guards the `Bash` tool (for `git` and `gh` commands) and the `Edit`, `Write`,
 
 For a Bash command, every segment is classified and the command-level decision
 is: **any segment needs `ask` → ask; else every segment is recognized-safe →
-allow; else defer.** So a non-git command can never ride along into an approval.
+allow; else defer.** A segment counts as recognized-safe if it's a safe git/gh
+invocation *or* a pure read-only filter (a pager like `head`/`tail`/`wc`) piped
+after one — so `git log | head` auto-approves, but a non-git, non-filter command
+can never ride along into an approval.
 
 The table below assumes the worktree is on a feature branch (`claude/x`) under
 the default `strict` [push policy](#push-guard).
@@ -68,6 +71,7 @@ the default `strict` [push policy](#push-guard).
 | `git push` / `git push -u origin HEAD` *(worktree branch)* | allow |
 | `git push --force` *(worktree branch)* | allow |
 | `gh pr view 123` / `gh pr list` / `gh repo view` | allow |
+| `git log \| head` / `gh pr checks 123 \| head -20` / `git diff --stat \| tail -n 5` *(piped to a read-only filter)* | allow |
 | `git pull --ff-only` | allow |
 | `git commit -m "fix"` *(on `main`)* | **ask** |
 | editing a file whose repo is on `main` *(Edit/Write/MultiEdit/NotebookEdit)* | **ask** |
@@ -81,6 +85,8 @@ the default `strict` [push policy](#push-guard).
 | `git pull` *(may merge or rebase)* | **ask** |
 | `git rebase`/`git merge` *(onto `main`)* | **ask** |
 | `git status && rm -rf foo` *(non-git segment)* | defer |
+| `git log \| cat file.txt` *(filter reads a file)* / `git status \| tee out` *(filter writes)* | defer |
+| `head -5` *(no git/gh segment)* | defer |
 | `` git status `touch evil` `` / `git commit -m "$(touch evil)"` *(hidden command substitution)* | defer |
 | `git status <(touch evil)` *(process substitution)* | defer |
 | `git checkout file.txt` *(ambiguous: branch vs. file)* | defer |
@@ -98,6 +104,20 @@ target like `` git diff > `evil` ``), so a would-be `allow` is downgraded to def
 switch branches or discard a file's changes — and the hook defers on ambiguity
 rather than guess. Only the unambiguous branch-create form (`git checkout -b`)
 auto-approves.
+
+One narrow relaxation of the all-segments rule covers a constant AI-agent habit:
+piping read-only git/gh output through a pager. A trailing segment also counts as
+recognized-safe when it's a **pure read-only filter** — `head`, `tail`, `cat`,
+`wc`, `nl`, `sort`, `uniq`, `cut`, `column`, `less`, `more` — so
+`git log | head` and `gh pr checks 123 | head -20` auto-approve. A filter
+qualifies only when *all* hold: (1) the program is in that allowlist; (2) it has
+**no non-flag positional argument**, so it consumes stdin, not a file
+(`git log | cat file.txt` defers — reading a file is workspace-guard's domain);
+and (3) it carries no write option (`sort -o out` defers). The command must still
+contain at least one git/gh segment, so `head -5` on its own keeps deferring, and
+a protective `ask` (`git commit | head` on `main`) still wins. `sed` and `awk`
+are deliberately excluded — both can write files (`sed -i`, `awk '… > f'`) or run
+code.
 
 The **ask** rows assume an interactive or `default`-mode session. In a
 non-interactive mode (`auto`, `dontAsk`, `bypassPermissions`) the same commands
@@ -222,7 +242,12 @@ reinstall **branch-guard** from it.
    unknown or ambiguous forms defer. The branch is resolved with
    `git symbolic-ref` (the session cwd for Bash, the file's own repo for edits).
 5. **Combine** the segment verdicts: any `ask` → ask; else every segment must be
-   `allow` → allow; else defer. Two things downgrade a would-be `allow` to defer
+   recognized-safe → allow; else defer. A segment is recognized-safe when it's a
+   git/gh `allow` or a **pure read-only filter** piped after one — `head`,
+   `tail`, `cat`, `wc`, `nl`, `sort`, `uniq`, `cut`, `column`, `less`, `more`
+   with no file positional and no write option (`git log | head -20`). At least
+   one git/gh segment is still required (`head -5` alone defers). Two things
+   downgrade a would-be `allow` to defer
    without ever weakening a protective `ask`: an inline-config escape hatch
    (`git -c core.pager='!sh …' log`), and a hidden command/process substitution
    in the raw token stream (`` `…` ``, `$(…)`, `<(…)`/`>(…)`, or an unrecognized
@@ -253,7 +278,9 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   `git pull` (which may merge or rebase) prompts.
 - **Run git commands on their own, not chained with non-git commands.**
   `git commit && <other>` won't auto-approve — the trailing command can't ride
-  along. Run them as separate commands.
+  along. Run them as separate commands. (One exception: piping read-only output
+  through a pager — `git log | head`, `gh pr checks 123 | head -20` — stays
+  auto-approved.)
 - **Expect a prompt for destructive commands** (`reset --hard`, `clean -f`,
   `branch -D`, `restore <path>`, `config --global`) — that's by design.
 ```

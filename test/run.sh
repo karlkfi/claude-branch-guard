@@ -313,5 +313,48 @@ check "\$(...) splits into a segment -> none (defer)" none \
 check "; separator -> none (defer)" none \
   "$(decision_for "$(bash_cmd 'git status; touch x')" "$WORK")"
 
+# ---------------------------------------------------------------------------
+# 19. Pipe to a pure read-only filter: a recognized-safe git/gh segment piped
+#     into a pager/formatter (head/tail/wc/…) stays `allow` instead of
+#     deferring. A filter with a file positional, a write option, a non-filter
+#     program, or no git/gh segment at all does NOT ride along.
+check "git log | head -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git log | head')" "$WORK")"
+check "gh pr checks | head -20 -> allow" allow \
+  "$(decision_for "$(bash_cmd 'gh pr checks 123 | head -20')" "$WORK")"
+check "git diff --stat | tail -n 5 -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git diff --stat | tail -n 5')" "$WORK")"
+check "git log | wc -l -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git log | wc -l')" "$WORK")"
+check "git commit | head on feature -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git commit -m x | head')" "$WORK")"
+# Protective ask still wins over a trailing read filter.
+git -C "$WORK" checkout -q main
+check "git commit | head on main -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git commit -m x | head')" "$WORK")"
+git -C "$WORK" checkout -q claude/x
+# A read filter alone (no git/gh segment) keeps deferring.
+check "head -5 (no git) -> none" none \
+  "$(decision_for "$(bash_cmd 'head -5')" "$WORK")"
+check "cat somefile (no git) -> none" none \
+  "$(decision_for "$(bash_cmd 'cat somefile')" "$WORK")"
+# A filter with a file positional reads a file (workspace-guard's domain) -> defer.
+check "git log | cat file.txt -> none" none \
+  "$(decision_for "$(bash_cmd 'git log | cat file.txt')" "$WORK")"
+check "git log | sort big.txt -> none" none \
+  "$(decision_for "$(bash_cmd 'git log | sort big.txt')" "$WORK")"
+# A filter that can WRITE never rides along.
+check "git log | sort -o out -> none" none \
+  "$(decision_for "$(bash_cmd 'git log | sort -o out')" "$WORK")"
+check "git log | sort -oout (attached) -> none" none \
+  "$(decision_for "$(bash_cmd 'git log | sort -oout')" "$WORK")"
+check "git log | sed -i s/a/b/ file -> none" none \
+  "$(decision_for "$(bash_cmd 'git log | sed -i s/a/b/ file')" "$WORK")"
+check "git status | tee out -> none" none \
+  "$(decision_for "$(bash_cmd 'git status | tee out')" "$WORK")"
+# A trailing non-filter command after a filter still can't ride along.
+check "git log | head; rm -rf x -> none" none \
+  "$(decision_for "$(bash_cmd 'git log | head ; rm -rf x')" "$WORK")"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]
