@@ -1,11 +1,17 @@
 {
-  "name": "claude-branch-guard",
-  "owner": { "name": "Karl Isenberg", "email": "karlkfi@gmail.com" },
+  "name": "branch-guard",
+  "owner": { "name": "karlkfi", "url": "https://github.com/karlkfi" },
+  "description": "Guard rails for Claude Code git/gh commands and protected branches.",
   "plugins": [
     {
       "name": "branch-guard",
-      "source": "./",
-      "description": "Cut routine git/gh approval prompts: auto-approve safe commands (read-only, staging, branch/worktree create, feature-branch commits & pushes) and confirm protected-branch or destructive ones."
+      "version": "0.1.0",
+      "description": "Cut routine git/gh approval prompts: auto-approve safe commands (read-only, staging, branch/worktree create, feature-branch commits & pushes) and confirm protected-branch or destructive ones.",
+      "author": { "name": "Karl Isenberg" },
+      "source": {
+        "source": "github",
+        "repo": "karlkfi/claude-branch-guard"
+      }
     }
   ]
 }
