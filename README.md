@@ -53,9 +53,12 @@ It guards the `Bash` tool (for `git` and `gh` commands) and the `Edit`, `Write`,
 For a Bash command, every segment is classified and the command-level decision
 is: **any segment needs `ask` → ask; else every segment is recognized-safe →
 allow; else defer.** A segment counts as recognized-safe if it's a safe git/gh
-invocation *or* a pure read-only filter (a pager like `head`/`tail`/`wc`) piped
-after one — so `git log | head` auto-approves, but a non-git, non-filter command
-can never ride along into an approval.
+invocation, a pure read-only filter (a pager like `head`/`tail`/`wc`) piped after
+one, *or* a side-effect-free label/no-op (`echo`/`printf`/`true`) — so
+`git log | head` and `git log … ; echo "---" ; git log …` auto-approve, but a
+non-git, non-filter, non-benign command can never ride along into an approval. A
+segment that writes a file via an output redirect (`git log > f`, `echo x > f`;
+`/dev/null` and the standard streams don't count) is downgraded out of `allow`.
 
 The table below assumes the worktree is on a feature branch (`claude/x`) under
 the default `strict` [push policy](#push-guard).
@@ -72,6 +75,8 @@ the default `strict` [push policy](#push-guard).
 | `git push --force` *(worktree branch)* | allow |
 | `gh pr view 123` / `gh pr list` / `gh repo view` | allow |
 | `git log \| head` / `gh pr checks 123 \| head -20` / `git diff --stat \| tail -n 5` *(piped to a read-only filter)* | allow |
+| `git log --oneline ; echo "---" ; git status` *(label/no-op between git reads)* | allow |
+| `git fetch 2>/dev/null` / `git log >/dev/null 2>&1` *(discard redirect / fd-dup)* | allow |
 | `git pull --ff-only` | allow |
 | `git commit -m "fix"` *(on `main`)* | **ask** |
 | editing a file whose repo is on `main` *(Edit/Write/MultiEdit/NotebookEdit)* | **ask** |
@@ -85,8 +90,10 @@ the default `strict` [push policy](#push-guard).
 | `git pull` *(may merge or rebase)* | **ask** |
 | `git rebase`/`git merge` *(onto `main`)* | **ask** |
 | `git status && rm -rf foo` *(non-git segment)* | defer |
+| `git log --format=… > out.txt` *(redirects git output to a real file)* | defer |
+| `git status ; echo x > out.txt` *(benign segment writes a file)* | defer |
 | `git log \| cat file.txt` *(filter reads a file)* / `git status \| tee out` *(filter writes)* | defer |
-| `head -5` *(no git/gh segment)* | defer |
+| `head -5` / `echo hi` *(no git/gh segment)* | defer |
 | `` git status `touch evil` `` / `git commit -m "$(touch evil)"` *(hidden command substitution)* | defer |
 | `git status <(touch evil)` *(process substitution)* | defer |
 | `git checkout file.txt` *(ambiguous: branch vs. file)* | defer |
@@ -100,6 +107,13 @@ git/gh invocation, so a trailing command can't ride along. The substitution rows
 defer for the same reason a level down — `` `…` ``, `$(…)`, and `<(…)`/`>(…)` run
 a command the classifier never sees (even inside a quoted argument or a redirect
 target like `` git diff > `evil` ``), so a would-be `allow` is downgraded to defer.
+An output redirect to a real file (`git log > out`, `echo x > out`) is treated the
+same way — it's a write side-effect the classifier can't otherwise see, so the
+segment is downgraded out of `allow`. This both hardens the read commands (a
+redirected `git log --format=…` can't silently write attacker-influenced content)
+and keeps a ride-along filter/label from sneaking a write through. Redirects to
+`/dev/null` or the standard streams, and fd-duplications like `2>&1`, write no
+file and keep allowing (`git fetch 2>/dev/null` stays auto-approved).
 `git checkout file.txt` **defers** because `checkout` is ambiguous — it could
 switch branches or discard a file's changes — and the hook defers on ambiguity
 rather than guess. Only the unambiguous branch-create form (`git checkout -b`)
@@ -118,6 +132,17 @@ contain at least one git/gh segment, so `head -5` on its own keeps deferring, an
 a protective `ask` (`git commit | head` on `main`) still wins. `sed` and `awk`
 are deliberately excluded — both can write files (`sed -i`, `awk '… > f'`) or run
 code.
+
+A second narrow relaxation covers the other constant habit: labelling output
+between commands. A segment also counts as recognized-safe when it's a
+**side-effect-free no-op** — `echo`, `printf`, `true`, `false`, `:` — so a label
+line in an all-git chain (`git log … ; echo "---" ; git status`) auto-approves
+instead of dropping the whole command to defer. These write only to stdout (or
+just set an exit status), so the two ways they could do harm are both already
+closed: an output redirect to a real file (`echo evil > ~/.gitconfig`) downgrades
+the segment via the write check above, and a command substitution (`echo $(…)`)
+downgrades the whole command. As with filters, the command must still contain a
+git/gh segment (`echo hi` alone defers) and a protective `ask` still wins.
 
 The **ask** rows assume an interactive or `default`-mode session. In a
 non-interactive mode (`auto`, `dontAsk`, `bypassPermissions`) the same commands
@@ -278,12 +303,13 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   auto-approves; pushing a different branch or a refspec like `HEAD:main` prompts.
 - **Prefer fast-forward pulls.** `git pull --ff-only` is auto-approved; a bare
   `git pull` (which may merge or rebase) prompts.
-- **Run git/gh commands on their own — don't interleave `echo` labels or other
-  non-git commands, even with `;`.** A single non-git segment defeats
-  auto-approval for the *whole* chain, so `git log … ; echo "---" ; git log …`
-  and `git commit && <other>` both prompt — the extra command can't ride along.
-  Run each as a separate call, or pipe read-only output through a pager
-  (`git log | head`, `gh pr checks 123 | head -20`), which stays auto-approved.
+- **Chaining git/gh with harmless labels is fine; a real command is not.**
+  Read-only labels/no-ops ride along, so `git log … ; echo "---" ; git status`
+  and `git log | head` auto-approve — but `git commit && <other-command>` prompts
+  because `<other-command>` can't ride along. Keep genuinely separate work (`rm`,
+  builds, file writes) in its own call. Two forms still drop a git+label chain to
+  a prompt: redirecting output to a file (`echo x > f`, `git log > f`) and command
+  substitution (`echo $(…)`).
 - **Expect a prompt for destructive commands** (`reset --hard`, `clean -f`,
   `branch -D`, `restore <path>`, `config --global`) — that's by design.
 ```

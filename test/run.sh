@@ -367,7 +367,10 @@ check "git status 2>&1 -> allow" allow \
   "$(decision_for "$(bash_cmd 'git status 2>&1')" "$WORK")"
 check "git log 2>/dev/null -> allow" allow \
   "$(decision_for "$(bash_cmd 'git log 2>/dev/null')" "$WORK")"
-check "git log 1>out 2>err -> allow" allow \
+# A real-file target (not /dev/null or an fd dup) is a write side-effect: the
+# single-digit fd prefix is still dropped, but the would-be allow is downgraded
+# to defer by the redirect-write awareness (see section 21).
+check "git log 1>out 2>err -> none (writes real files)" none \
   "$(decision_for "$(bash_cmd 'git log 1>out 2>err')" "$WORK")"
 # `>&2` with no fd prefix means redirect stdout to stderr — no positional dropped.
 check "git push origin HEAD >&2 -> allow" allow \
@@ -389,6 +392,70 @@ check "git push origin main 2>&1 -> ask" ask \
   "$(decision_for "$(bash_cmd 'git push origin main 2>&1')" "$WORK")"
 check "git reset --hard 2>&1 -> ask" ask \
   "$(decision_for "$(bash_cmd 'git reset --hard 2>&1')" "$WORK")"
+
+# ---------------------------------------------------------------------------
+# 21. Redirect-write awareness (hardening). An output redirect to a real FILE is
+#     a write side-effect the classifier can't see (`git log --format=… > f`
+#     writes possibly-attacker-influenced content), so a would-be `allow` is
+#     downgraded to defer. Redirects to /dev/null or a standard stream, and fd
+#     duplications (`2>&1`), create no file and keep allowing.
+check "git log > realfile -> none (write downgrade)" none \
+  "$(decision_for "$(bash_cmd 'git log > out.txt')" "$WORK")"
+check "git diff >> realfile -> none (write downgrade)" none \
+  "$(decision_for "$(bash_cmd 'git diff >> out.txt')" "$WORK")"
+check "git log --format > realfile -> none (the write primitive)" none \
+  "$(decision_for "$(bash_cmd 'git log --format=%s -1 > pwned')" "$WORK")"
+check "git status 2>realfile -> none (stderr to file)" none \
+  "$(decision_for "$(bash_cmd 'git status 2>err.txt')" "$WORK")"
+# Discard / standard-stream targets create no file -> still allow.
+check "git log >/dev/null -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git log >/dev/null')" "$WORK")"
+check "git log >/dev/stdout -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git log >/dev/stdout')" "$WORK")"
+# A file-writing redirect must NOT weaken a protective ask.
+check "git reset --hard > out -> ask (write doesn't weaken ask)" ask \
+  "$(decision_for "$(bash_cmd 'git reset --hard > out.txt')" "$WORK")"
+# A bare redirect with no command writes a file -> it blocks the chain.
+check "> out ; git status -> none (bare write blocks)" none \
+  "$(decision_for "$(bash_cmd '> out.txt ; git status')" "$WORK")"
+
+# ---------------------------------------------------------------------------
+# 22. Benign label/no-op segments (echo/printf/true/false/:). With no
+#     file-writing redirect and no shell substitution these are side-effect-free
+#     (stdout / exit status only), so one may ride along after a recognized-safe
+#     git/gh segment — keeping an all-git chain with a label line auto-approved.
+check 'git log ; echo label ; git status -> allow' allow \
+  "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git log --oneline -1 ; echo \"---\" ; git status"}}' "$WORK")"
+check "git status && echo done -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git status && echo done')" "$WORK")"
+check "git status ; printf -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git status ; printf hello')" "$WORK")"
+check "git status ; true -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git status ; true')" "$WORK")"
+check "git status ; : -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git status ; :')" "$WORK")"
+check "git fetch || echo failed -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git fetch || echo failed')" "$WORK")"
+# A benign-only command (no git/gh segment) still defers.
+check "echo hi (no git) -> none" none \
+  "$(decision_for "$(bash_cmd 'echo hi')" "$WORK")"
+check "echo hi ; true (no git) -> none" none \
+  "$(decision_for "$(bash_cmd 'echo hi ; true')" "$WORK")"
+# An echo that writes a file is NOT benign (redirect) -> defer.
+check "git status ; echo evil > f -> none (echo write)" none \
+  "$(decision_for "$(bash_cmd 'git status ; echo evil > pwned')" "$WORK")"
+# echo to /dev/null is harmless and rides along.
+check "git status ; echo x >/dev/null -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git status ; echo x >/dev/null')" "$WORK")"
+# Substitution inside a benign segment still downgrades the whole command.
+check 'git status ; echo $(rm) -> none (subst)' none \
+  "$(decision_for "$(bash_cmd 'git status ; echo $(rm -rf x)')" "$WORK")"
+# A real non-git command still can't ride along behind a benign one.
+check "git status && echo done && rm -rf foo -> none" none \
+  "$(decision_for "$(bash_cmd 'git status && echo done && rm -rf foo')" "$WORK")"
+# A benign segment must NOT weaken a protective ask.
+check "git reset --hard ; echo done -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git reset --hard ; echo done')" "$WORK")"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]

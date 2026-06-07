@@ -11,9 +11,12 @@ For Bash `git`/`gh` commands it emits a per-command decision:
            destructive command like `reset --hard`, `clean -f`, `branch -D`);
   (none) — defer: emit nothing, so the normal permission flow applies.
 
-A command is auto-approved only when EVERY segment in it is a recognized-safe
-git/gh invocation, so a non-git command can't ride along into an approval
-(`git status && rm -rf foo` defers rather than allows).
+A command is auto-approved only when EVERY segment in it is recognized-safe — a
+git/gh invocation classified `allow`, a read-only pager piped after one
+(`git log | head`), or a side-effect-free label/no-op (`echo "---"`) — so a
+non-git command can't ride along into an approval (`git status && rm -rf foo`
+defers rather than allows). A segment that writes a file via an output redirect
+(`git log > f`, `echo x > f`) is downgraded out of `allow` for the same reason.
 
 Also guards file edits (Edit/Write/MultiEdit/NotebookEdit) against the branch of
 the file's own repository, and `git push` according to BRANCH_GUARD_PUSH_POLICY.
@@ -51,6 +54,16 @@ REDIR = {'>', '>>', '<', '<<', '<<<', '>|', '&>', '&>>', '>&', '<&'}
 # Excludes `&>`/`&>>`, where the `&` already means both stdout+stderr and bash
 # forbids an fd prefix — so a digit before them is a real argument, not an fd.
 FD_PREFIX_REDIR = REDIR - {'&>', '&>>'}
+# Output redirects whose target is always a FILE (a write side-effect). A
+# segment carrying one downgrades a would-be `allow` to defer; the dup form
+# `>&` is handled separately (it writes only when its target is a filename, not
+# an fd like `2>&1`), and input redirects (`<`, `<<`, `<<<`, `<&`) never write.
+WRITE_REDIR_OPS = frozenset({'>', '>>', '>|', '&>', '&>>'})
+# Redirect targets that create no real file: the bit bucket and the standard
+# streams (writing here is equivalent to no redirect). A redirect to one of
+# these is NOT treated as a file write, so ubiquitous noise-silencing forms
+# (`git fetch 2>/dev/null`, `… >/dev/null 2>&1`) stay auto-approvable.
+DISCARD_TARGETS = frozenset({'/dev/null', '/dev/stdout', '/dev/stderr'})
 # Every char shlex treats as punctuation (matches the tokenizer below).
 PUNCT_CHARS = frozenset(';()<>|&\n')
 
@@ -127,6 +140,18 @@ FILTER_VALUE_OPTS = {
 # swallow cut's read-only `--output-delimiter`.
 FILTER_WRITE_OPT_RE = re.compile(r'^(-o|--output(=|$))')
 
+# Side-effect-free no-op / label commands. With no file-writing redirect (see
+# `command_segments`' writes flag) and no shell substitution (see
+# `has_shell_substitution`), these write only to stdout or just set an exit
+# status — touching neither the filesystem nor the process table. One may ride
+# along AFTER a recognized-safe git/gh segment, so a label line in an otherwise
+# all-git chain (`git log … ; echo "---" ; git log …`) stays auto-approved
+# instead of dropping the whole command to defer. Deliberately tiny: anything
+# that can write a file or run code on its own stays out, and the
+# redirect/substitution gating is what keeps even these safe (`echo x > f` and
+# `echo $(…)` both still defer).
+BENIGN_COMMANDS = frozenset({'echo', 'printf', 'true', 'false', ':'})
+
 # `git push` options that consume a separate following value token.
 PUSH_VALUE_OPTS = {'--repo', '-o', '--push-option', '--receive-pack', '--exec'}
 # `git push` flags that push more than the current branch.
@@ -197,20 +222,42 @@ def has_shell_substitution(tokens):
     return False
 
 
+def redirect_writes_file(op, target):
+    """True if a redirect operator+target writes to a FILE, so a would-be
+    `allow` should be downgraded to defer. Output-to-file operators
+    (`>`, `>>`, `>|`, `&>`, `&>>`) always write. The dup operator `>&` writes
+    only when its target is a filename rather than an fd number or `-`
+    (`>&2`/`2>&1` duplicate a descriptor and create no file). Input redirects
+    (`<`, `<<`, `<<<`, `<&`) never write. A redirect to `/dev/null` or a
+    standard stream (DISCARD_TARGETS) creates no real file and never counts."""
+    if target in DISCARD_TARGETS:
+        return False
+    if op in WRITE_REDIR_OPS:
+        return True
+    if op == '>&':
+        return target is not None and target != '-' and not target.isdigit()
+    return False
+
+
 def command_segments(tokens):
     """Split a flat token list (from `tokenize`) into simple-command segments.
 
-    Returns a list of token-lists, one per command separated by top-level
-    operators (`&&`, `||`, `;`, `|`, `&`, newlines, subshell parens) and with
-    redirect targets stripped out.
+    Returns a list of `(tokens, writes_file)` pairs, one per command separated
+    by top-level operators (`&&`, `||`, `;`, `|`, `&`, newlines, subshell
+    parens), with redirect targets stripped out. `writes_file` is True when the
+    segment carries an output redirect to a FILE (`> f`, `2> f`, `&> f`,
+    `>& f`) — used to downgrade a would-be `allow` to defer; fd-duplications
+    (`2>&1`, `>&2`) and input redirects (`< f`) leave it False. A bare redirect
+    with no command (`> f`) is kept as an empty writing segment so it still
+    blocks auto-approval rather than vanishing.
     """
-    segments, cur, i = [], [], 0
+    segments, cur, writes, i = [], [], False, 0
     while i < len(tokens):
         t = tokens[i]
         if t in SEPARATORS:
-            if cur:
-                segments.append(cur)
-                cur = []
+            if cur or writes:
+                segments.append((cur, writes))
+            cur, writes = [], False
             i += 1
             continue
         if t in REDIR:
@@ -223,12 +270,15 @@ def command_segments(tokens):
             # (not `&>`/`&>>`, where a leading digit is a real argument).
             if t in FD_PREFIX_REDIR and cur and len(cur[-1]) == 1 and cur[-1].isdigit():
                 cur.pop()
+            target = tokens[i + 1] if i + 1 < len(tokens) else None
+            if redirect_writes_file(t, target):
+                writes = True
             i += 2 if i + 1 < len(tokens) else 1   # drop operator + its target
             continue
         cur.append(t)
         i += 1
-    if cur:
-        segments.append(cur)
+    if cur or writes:
+        segments.append((cur, writes))
     return segments
 
 
@@ -300,6 +350,27 @@ def is_safe_read_filter(tokens):
             continue
         return False                     # a non-flag positional (file path)
     return True
+
+
+def is_benign_segment(tokens):
+    r"""True if a non-git segment is a side-effect-free no-op/label command
+    (program in BENIGN_COMMANDS after stripping a leading path and any env
+    prefix, like `parse_invocation`). The caller must independently ensure the
+    segment has no file-writing redirect (`command_segments`' writes flag) and
+    the command has no shell substitution (`has_shell_substitution`); with those
+    closed these write only to stdout or set an exit status, so one can ride
+    along after a recognized-safe git/gh segment. `echo "label"`,
+    `printf '%s\n' x`, `true`, `:` qualify; the gating elsewhere still defers
+    `echo x > f` (redirect) and `echo $(…)` (substitution). No option/positional
+    inspection is needed: with redirect and substitution closed, no argument to
+    these programs writes a file or runs code."""
+    i = 0
+    while i < len(tokens) and ASSIGNMENT_RE.match(tokens[i]):
+        i += 1
+    if i >= len(tokens):
+        return False
+    prog = tokens[i].rsplit('/', 1)[-1]
+    return prog in BENIGN_COMMANDS
 
 
 def ref_to_branch(ref, current):
@@ -599,34 +670,50 @@ def main():
         except ValueError:
             return                                 # unbalanced quotes -> defer
         segments = command_segments(tokens)
-        invs = [parse_invocation(seg) for seg in segments]
+        invs = [parse_invocation(seg) for seg, _ in segments]
         if not any(invs):
             return                                 # no git/gh command -> defer
 
         policy = push_policy()
         branch = current_branch(data.get('cwd') or os.getcwd())
         verdicts = []
-        for seg, inv in zip(segments, invs):
+        for (seg, writes), inv in zip(segments, invs):
             if inv is None:
                 # A non-git segment rides along only if it's a pure read-only
-                # filter (`git log | head`); otherwise it's `nongit` and the
-                # command can't be auto-approved. `not any(invs)` above already
-                # guaranteed at least one git/gh segment, so a filter-only
-                # command (`head -5`) defers rather than allows.
-                verdicts.append(('filter', None) if is_safe_read_filter(seg)
-                                else ('nongit', None))
+                # filter (`git log | head`) or a side-effect-free label/no-op
+                # (`echo "---"`). A segment that writes a file, or anything
+                # else, is `nongit` so the command can't be auto-approved.
+                # `not any(invs)` above already guaranteed at least one git/gh
+                # segment, so a filter-/benign-only command (`head -5`,
+                # `echo hi`) defers rather than allows.
+                if writes:
+                    verdicts.append(('nongit', None))
+                elif is_safe_read_filter(seg):
+                    verdicts.append(('filter', None))
+                elif is_benign_segment(seg):
+                    verdicts.append(('benign', None))
+                else:
+                    verdicts.append(('nongit', None))
             else:
-                verdicts.append(classify_segment(inv, branch, policy))
+                verdict, reason = classify_segment(inv, branch, policy)
+                # An output redirect to a file is a write side-effect the
+                # classifier can't see (`git log --format=… > f` writes
+                # possibly-attacker-influenced content). Downgrade a would-be
+                # allow to defer, but never weaken a protective `ask`.
+                if writes and verdict == 'allow':
+                    verdict = 'defer'
+                verdicts.append((verdict, reason))
 
         # A protective ask wins over everything (and becomes deny when no human
         # is present). Otherwise the command is auto-approved only when EVERY
-        # segment is recognized-safe — a git/gh `allow` or a safe read filter —
-        # so a non-git, non-filter command can't ride along.
+        # segment is recognized-safe — a git/gh `allow`, a safe read filter, or
+        # a side-effect-free benign label — so a non-git, writing, or unknown
+        # segment can't ride along.
         for verdict, reason in verdicts:
             if verdict == 'ask':
                 confirm(reason, mode)
                 return
-        if all(verdict in ('allow', 'filter') for verdict, _ in verdicts):
+        if all(verdict in ('allow', 'filter', 'benign') for verdict, _ in verdicts):
             # A hidden command substitution / process substitution / unrecognized
             # operator would run code the classifier never saw, so it can't ride
             # along into an auto-approve — defer (the protective `ask` above is
