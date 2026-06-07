@@ -278,11 +278,12 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   auto-approves; pushing a different branch or a refspec like `HEAD:main` prompts.
 - **Prefer fast-forward pulls.** `git pull --ff-only` is auto-approved; a bare
   `git pull` (which may merge or rebase) prompts.
-- **Run git commands on their own, not chained with non-git commands.**
-  `git commit && <other>` won't auto-approve — the trailing command can't ride
-  along. Run them as separate commands. (One exception: piping read-only output
-  through a pager — `git log | head`, `gh pr checks 123 | head -20` — stays
-  auto-approved.)
+- **Run git/gh commands on their own — don't interleave `echo` labels or other
+  non-git commands, even with `;`.** A single non-git segment defeats
+  auto-approval for the *whole* chain, so `git log … ; echo "---" ; git log …`
+  and `git commit && <other>` both prompt — the extra command can't ride along.
+  Run each as a separate call, or pipe read-only output through a pager
+  (`git log | head`, `gh pr checks 123 | head -20`), which stays auto-approved.
 - **Expect a prompt for destructive commands** (`reset --hard`, `clean -f`,
   `branch -D`, `restore <path>`, `config --global`) — that's by design.
 ```
