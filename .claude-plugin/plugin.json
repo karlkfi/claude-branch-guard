@@ -1,7 +1,13 @@
 {
   "name": "branch-guard",
-  "description": "Cut routine git/gh approval prompts: auto-approve safe commands (read-only, staging, branch/worktree create, feature-branch commits & pushes) and confirm protected-branch or destructive ones.",
   "version": "0.1.0",
-  "author": { "name": "Karl Isenberg", "email": "karlkfi@gmail.com" },
-  "keywords": ["git", "gh", "hooks", "permissions", "safety", "worktree", "push"]
+  "description": "Cut routine git/gh approval prompts: auto-approve safe commands (read-only, staging, branch/worktree create, feature-branch commits & pushes) and confirm protected-branch or destructive ones.",
+  "author": {
+    "name": "Karl Isenberg",
+    "url": "https://github.com/karlkfi"
+  },
+  "homepage": "https://github.com/karlkfi/claude-branch-guard",
+  "repository": "https://github.com/karlkfi/claude-branch-guard",
+  "license": "MIT",
+  "keywords": ["claude-code", "hooks", "guardrail", "permissions", "safety", "git", "gh", "worktree", "push"]
 }
