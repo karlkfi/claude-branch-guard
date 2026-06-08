@@ -185,7 +185,7 @@ the IDE extensions, or **Claude Code for Claude Desktop**.
 
 ```
 /plugin marketplace add karlkfi/claude-branch-guard
-/plugin install branch-guard@claude-branch-guard
+/plugin install branch-guard@branch-guard
 ```
 
 **Claude Code for Claude Desktop** — use the **Customize** tab:
@@ -238,9 +238,9 @@ loaded one until you update and reload.
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
 ```
-/plugin marketplace update claude-branch-guard
-/plugin uninstall branch-guard@claude-branch-guard
-/plugin install branch-guard@claude-branch-guard
+/plugin marketplace update branch-guard
+/plugin uninstall branch-guard@branch-guard
+/plugin install branch-guard@branch-guard
 ```
 
 The first command re-fetches the marketplace manifest from the repo; the
