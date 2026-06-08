@@ -228,10 +228,12 @@ add it as a `directory` marketplace in `~/.claude/settings.json`:
 ## Upgrade
 
 branch-guard installs from a GitHub marketplace, which Claude Code tracks at the
-repository's default branch (`main`). It does **not** auto-update, and a running
-session won't pick up a newer release on its own: the installed version is
-resolved from the local marketplace cache when the session loads, so even after a
-new version is published you stay on the cached one until you update and reload.
+repository's default branch (`main`). Third-party marketplaces like this one have
+auto-update **off by default**, so unless you've turned it on the steps below are
+manual. Either way, a running session won't pick up a newer release on its own:
+auto-update is applied at startup and the installed version stays fixed for the
+life of the session, so even after a new version is published you stay on the
+loaded one until you update and reload.
 
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
