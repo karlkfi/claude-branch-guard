@@ -228,8 +228,10 @@ add it as a `directory` marketplace in `~/.claude/settings.json`:
 ## Upgrade
 
 branch-guard installs from a GitHub marketplace, which Claude Code tracks at the
-repository's default branch (`main`). It does **not** auto-update by default, so a
-newer release won't reach you until you refresh the marketplace and reinstall.
+repository's default branch (`main`). It does **not** auto-update, and a running
+session won't pick up a newer release on its own: the installed version is
+resolved from the local marketplace cache when the session loads, so even after a
+new version is published you stay on the cached one until you update and reload.
 
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
@@ -240,12 +242,36 @@ newer release won't reach you until you refresh the marketplace and reinstall.
 ```
 
 The first command re-fetches the marketplace manifest from the repo; the
-reinstall picks up the new version. After upgrading, run `/reload-plugins` to
-activate the updated hook without restarting, or restart Claude Code.
+reinstall picks up the new version.
 
-**Claude Code for Claude Desktop** — in the **Customize** tab's plugins /
-marketplaces section, refresh the `claude-branch-guard` marketplace, then
-reinstall **branch-guard** from it.
+**Claude Code for Claude Desktop (macOS)** — the update control is tucked away:
+
+1. Open **Customize > Plugins > Code**.
+2. Click the **3-dot (⋯) menu next to the plugin name** (`branch-guard`) and
+   choose **Check for updates**.
+3. If an update is offered, apply it.
+
+**Restart Claude Code after updating** (on any surface). The `PreToolUse` hook is
+registered at startup, so the new `branch-guard.py` only becomes the one that
+actually runs once Claude Code reloads — on the CLI/IDE `/reload-plugins` will
+re-register the hook without a full restart; on Desktop, restart the app.
+
+To verify the new version is active, check the installed manifest and cache:
+
+```bash
+# Installed version + commit the harness resolved
+python3 -m json.tool ~/.claude/plugins/installed_plugins.json | grep -A6 branch-guard
+
+# The new version's files were fetched into the cache
+ls ~/.claude/plugins/cache/branch-guard/branch-guard/
+```
+
+The `installed_plugins.json` entry should report the new `version` and a
+`gitCommitSha` matching the release tag's commit, and a directory for the new
+version should exist under
+`~/.claude/plugins/cache/branch-guard/branch-guard/`. If the `version` or
+`gitCommitSha` still shows the old release, the update didn't land — re-run the
+update step and restart.
 
 ## How it works
 
