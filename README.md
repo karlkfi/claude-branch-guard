@@ -73,7 +73,8 @@ the default `strict` [push policy](#push-guard).
 | `git add -A && git commit -m x && git push` *(feature branch)* | allow |
 | `git push` / `git push -u origin HEAD` *(worktree branch)* | allow |
 | `git push --force` *(worktree branch)* | allow |
-| `gh pr view 123` / `gh pr list` / `gh repo view` | allow |
+| `gh pr view 123` / `gh pr list` / `gh repo view` / `gh run watch` / `gh search prs` | allow |
+| `gh api repos/o/r` / `gh api -X GET …` *(a read — default or explicit GET)* | allow |
 | `git log \| head` / `gh pr checks 123 \| head -20` / `git diff --stat \| tail -n 5` *(piped to a read-only filter)* | allow |
 | `git log --oneline ; echo "---" ; git status` *(label/no-op between git reads)* | allow |
 | `git fetch 2>/dev/null` / `git log >/dev/null 2>&1` *(discard redirect / fd-dup)* | allow |
@@ -98,7 +99,8 @@ the default `strict` [push policy](#push-guard).
 | `git status <(touch evil)` *(process substitution)* | defer |
 | `git checkout file.txt` *(ambiguous: branch vs. file)* | defer |
 | `git -c core.pager=cat log` *(inline-config escape hatch)* | defer |
-| `gh pr create` *(gh mutation)* | defer |
+| `gh pr create` / `gh pr merge` / `gh run rerun` *(gh mutation)* | defer |
+| `gh api -X POST …` / `gh api … -f k=v` *(a write: non-GET method or a request body)* | defer |
 | `ls -la` *(not a git/gh command)* | defer |
 
 A few rows show the design's caution. `git status && rm -rf foo` **defers** rather

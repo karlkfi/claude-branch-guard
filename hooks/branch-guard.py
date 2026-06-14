@@ -91,17 +91,42 @@ READONLY_GIT = frozenset({
     'grep', 'fetch', 'ls-remote',
 })
 
-# Read-only gh (subcommand, sub-subcommand) pairs — auto-allowed.
+# Read-only gh (subcommand, sub-subcommand) pairs — auto-allowed. Every entry is
+# a pure read (view/list/status/diff/checks/search/watch); a mutation
+# (`gh pr create/edit/merge/comment`, `gh run rerun/cancel`, `gh workflow run`)
+# is deliberately absent so it defers — most are outward-facing publishes that
+# should keep a human in the loop. `gh run watch` only polls a run to completion;
+# `gh search …` only queries. `gh api` is handled separately (`classify_gh_api`)
+# because its safety depends on the HTTP method, not the subcommand name.
 READONLY_GH = frozenset({
     ('pr', 'view'), ('pr', 'list'), ('pr', 'status'), ('pr', 'diff'), ('pr', 'checks'),
     ('issue', 'view'), ('issue', 'list'), ('issue', 'status'),
-    ('repo', 'view'),
-    ('run', 'view'), ('run', 'list'),
+    ('repo', 'view'), ('repo', 'list'),
+    ('run', 'view'), ('run', 'list'), ('run', 'watch'),
     ('release', 'view'), ('release', 'list'),
     ('workflow', 'view'), ('workflow', 'list'),
+    ('search', 'prs'), ('search', 'issues'), ('search', 'repos'),
+    ('search', 'code'), ('search', 'commits'),
+    ('cache', 'list'), ('label', 'list'),
+    ('secret', 'list'), ('variable', 'list'),
+    ('ruleset', 'list'), ('ruleset', 'view'),
+    ('gist', 'list'), ('gist', 'view'),
     ('auth', 'status'),
     ('status', ''),
 })
+
+# `gh api` options that consume a SEPARATE following value token, so the value
+# isn't re-read as another option. (`--opt=value` and attached short forms like
+# `-XPOST` are a single token and need no entry.)
+GH_API_VALUE_OPTS = {
+    '-X', '--method', '-H', '--header', '-q', '--jq', '-t', '--template',
+    '-F', '--field', '-f', '--raw-field', '--input', '--cache', '--hostname',
+    '-p', '--preview',
+}
+# `gh api` options that supply a request BODY. gh defaults to a POST when any of
+# these is present, so the call is a WRITE — its presence forces a defer
+# regardless of method. (`--input -` reads the body from stdin.)
+GH_API_BODY_OPTS = ('--field', '--raw-field', '--input', '-F', '-f')
 
 # Pure read-only "filter" programs — pagers/formatters that read stdin (or a
 # file) and write only to stdout. A segment running one of these is safe to ride
@@ -583,8 +608,48 @@ def classify_git(sub, args, branch, policy):
     return ('defer', None)                # unknown subcommand -> normal flow
 
 
+def classify_gh_api(args):
+    """Verdict for a `gh api` command. `gh api` defaults to a GET (read), so the
+    proven-read form auto-allows; anything that could mutate defers. A call
+    mutates when it carries a request BODY (a `--field`/`--raw-field`/`--input`
+    flag — gh then defaults to POST) or an explicit non-GET/HEAD `--method`/`-X`.
+    Fails safe: any method token we can't read as GET/HEAD, or any body flag,
+    defers rather than allowing. Read-only modifiers (`--jq`, `--header`,
+    `--paginate`, `--cache`, …) don't disqualify."""
+    method = 'GET'
+    i = 0
+    while i < len(args):
+        t = args[i]
+        # A request body makes gh default to POST -> a write (all spellings,
+        # attached or separate: `-f`, `-fkey=v`, `--field`, `--field=k=v`, …).
+        if any(t == o or t.startswith(o + '=') or
+               (len(o) == 2 and t.startswith(o)) for o in GH_API_BODY_OPTS):
+            return ('defer', None)
+        # Explicit HTTP method, all spellings: `-X POST`, `-XPOST`,
+        # `--method POST`, `--method=POST`.
+        if t in ('-X', '--method'):
+            method = args[i + 1] if i + 1 < len(args) else ''
+            i += 2
+            continue
+        if t.startswith('-X') and len(t) > 2:
+            method = t[2:]
+            i += 1
+            continue
+        if t.startswith('--method='):
+            method = t[len('--method='):]
+            i += 1
+            continue
+        if t in GH_API_VALUE_OPTS:        # skip the value of other value-opts
+            i += 2
+            continue
+        i += 1
+    return ('allow', None) if method.upper() in ('GET', 'HEAD') else ('defer', None)
+
+
 def classify_gh(sub, args):
     """Verdict for a `gh <sub>` command: allow read-only ones, defer the rest."""
+    if sub == 'api':
+        return classify_gh_api(args)
     pos = [a for a in args if not a.startswith('-')]
     subsub = pos[0] if pos else ''
     if (sub, subsub) in READONLY_GH or (sub, '') in READONLY_GH:

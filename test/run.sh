@@ -288,6 +288,34 @@ check "gh status && git status -> allow" allow \
   "$(decision_for "$(bash_cmd 'gh pr list && git status')" "$WORK")"
 check "gh pr create -> none (defer)" none \
   "$(decision_for "$(bash_cmd 'gh pr create --fill')" "$WORK")"
+# 17b. Read-only gh reads added to the allowlist (run watch / search / list-view).
+for c in "gh run watch 123" "gh run watch 123 --exit-status" \
+         "gh search prs --state open" "gh search code foo" \
+         "gh repo list karlkfi" "gh secret list" "gh variable list" \
+         "gh ruleset list" "gh ruleset view 1" "gh cache list" \
+         "gh label list" "gh gist list" "gh gist view abc"; do
+  check "readonly gh: $c -> allow" allow "$(decision_for "$(bash_cmd "$c")" "$WORK")"
+done
+# gh mutations that are NOT in the allowlist still defer (outward-facing writes).
+for c in "gh run rerun 123" "gh run cancel 123" "gh workflow run ci.yml" \
+         "gh pr merge 5" "gh pr comment 5 --body hi" "gh secret set X" \
+         "gh release download v1"; do
+  check "gh mutation: $c -> none (defer)" none "$(decision_for "$(bash_cmd "$c")" "$WORK")"
+done
+
+# 17c. `gh api` is classified by HTTP method: a default/explicit GET reads (allow);
+#      a write method or a request body (--field/--raw-field/--input) defers.
+for c in "gh api repos/o/r" "gh api repos/o/r --jq .name" \
+         "gh api -H Accept:x repos/o/r" "gh api repos/o/r --paginate" \
+         "gh api -X GET repos/o/r/issues" "gh api --method GET user"; do
+  check "gh api GET: $c -> allow" allow "$(decision_for "$(bash_cmd "$c")" "$WORK")"
+done
+for c in "gh api -X POST repos/o/r/issues" "gh api --method=PATCH repos/o/r" \
+         "gh api -XDELETE repos/o/r/labels/x" "gh api repos/o/r -f title=x" \
+         "gh api repos/o/r -F n=1" "gh api repos/o/r --field title=x" \
+         "gh api --input body.json repos/o/r" "gh api graphql -f query=x"; do
+  check "gh api write: $c -> none (defer)" none "$(decision_for "$(bash_cmd "$c")" "$WORK")"
+done
 
 # 18. Shell-substitution bypass guard: a would-be `allow` defers when a raw
 #     token hides a command the classifier never sees (command/process
