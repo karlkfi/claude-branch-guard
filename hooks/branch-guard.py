@@ -643,15 +643,28 @@ def classify_gh_api(args):
             i += 2
             continue
         i += 1
-    return ('allow', None) if method.upper() in ('GET', 'HEAD') else ('defer', None)
+    if method.upper() in ('GET', 'HEAD'):
+        return ('allow', None)
+    # Deleting a git ref (branch/tag) via the REST API is destructive — ask
+    # rather than defer, mirroring `git branch -D` / `git push --delete`. The
+    # canonical endpoint is `DELETE /repos/{o}/{r}/git/refs/heads/{branch}`.
+    if method.upper() == 'DELETE' and any('git/refs/' in a for a in args):
+        return ('ask', "`gh api` deletes a git ref (branch/tag) — confirm before proceeding.")
+    return ('defer', None)
 
 
 def classify_gh(sub, args):
-    """Verdict for a `gh <sub>` command: allow read-only ones, defer the rest."""
+    """Verdict for a `gh <sub>` command: allow read-only ones, ask on branch
+    deletion, defer the rest."""
     if sub == 'api':
         return classify_gh_api(args)
     pos = [a for a in args if not a.startswith('-')]
     subsub = pos[0] if pos else ''
+    # `gh pr merge|close --delete-branch` (`-d`) removes the branch as a side
+    # effect — destructive, so ask (mirrors `git branch -D` / `git push --delete`).
+    if sub == 'pr' and subsub in ('merge', 'close') and (
+            '--delete-branch' in args or 'd' in short_flag_letters(args)):
+        return ('ask', "`gh pr {} --delete-branch` deletes the branch — confirm before proceeding.".format(subsub))
     if (sub, subsub) in READONLY_GH or (sub, '') in READONLY_GH:
         return ('allow', None)
     return ('defer', None)

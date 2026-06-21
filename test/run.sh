@@ -316,6 +316,16 @@ for c in "gh api -X POST repos/o/r/issues" "gh api --method=PATCH repos/o/r" \
          "gh api --input body.json repos/o/r" "gh api graphql -f query=x"; do
   check "gh api write: $c -> none (defer)" none "$(decision_for "$(bash_cmd "$c")" "$WORK")"
 done
+# 17d. Deleting a branch via gh is destructive — ask, not defer (mirrors
+#      `git branch -D` / `git push --delete`). Covers the gh-api refs endpoint
+#      (all method spellings) and the `--delete-branch`/`-d` flag on pr merge/close.
+for c in "gh api -X DELETE repos/o/r/git/refs/heads/feature-x" \
+         "gh api -XDELETE repos/o/r/git/refs/heads/main" \
+         "gh api --method DELETE repos/o/r/git/refs/tags/v1" \
+         "gh pr merge 5 --delete-branch" "gh pr merge 5 -d" \
+         "gh pr close 5 --delete-branch" "gh pr close 5 -d"; do
+  check "gh branch delete: $c -> ask" ask "$(decision_for "$(bash_cmd "$c")" "$WORK")"
+done
 
 # 18. Shell-substitution bypass guard: a would-be `allow` defers when a raw
 #     token hides a command the classifier never sees (command/process
