@@ -87,7 +87,9 @@ the default `strict` [push policy](#push-guard).
 | `git clean -fd` | **ask** |
 | `git branch -D old` | **ask** |
 | `gh pr merge 5 --delete-branch` / `gh pr close 5 -d` *(deletes the branch)* | **ask** |
+| `gh repo delete owner/repo` / `gh label delete bug` *(deletes a resource)* | **ask** |
 | `gh api -X DELETE …/git/refs/heads/feature-x` *(deletes a branch/tag ref)* | **ask** |
+| `gh api -X DELETE …/labels/bug` *(deletes a label)* | **ask** |
 | `git restore file.txt` *(discards working changes)* | **ask** |
 | `git config --global user.name x` | **ask** |
 | `git pull` *(may merge or rebase)* | **ask** |
@@ -103,7 +105,7 @@ the default `strict` [push policy](#push-guard).
 | `git -c core.pager=cat log` *(inline-config escape hatch)* | defer |
 | `gh pr create` / `gh pr merge 5` / `gh run rerun` *(gh mutation, no branch delete)* | defer |
 | `gh api -X POST …` / `gh api … -f k=v` *(a write: non-GET method or a request body)* | defer |
-| `gh api -X DELETE …/labels/x` *(a non-ref delete)* | defer |
+| `gh api -X DELETE repos/o/r` / `gh release delete v1` *(other deletes — not yet matched)* | defer |
 | `ls -la` *(not a git/gh command)* | defer |
 
 A few rows show the design's caution. `git status && rm -rf foo` **defers** rather
@@ -298,9 +300,11 @@ update step and restart.
    `switch -c`, `worktree add`, branch/tag create) allow on any branch;
    branch-sensitive mutations (`commit`, `merge`, `rebase`, `cherry-pick`,
    `stash`, `push`) allow on a feature branch and ask on a protected one;
-   destructive commands (`reset --hard`, `clean -f`, `branch -D`, deleting a
-   branch via `gh pr merge|close --delete-branch` or `gh api -X DELETE …/git/refs/heads/…`, …)
-   ask; unknown or ambiguous forms defer. The branch is resolved with
+   destructive commands (`reset --hard`, `clean -f`, `branch -D`, and gh
+   deletes — a branch via `gh pr merge|close --delete-branch` or
+   `gh api -X DELETE …/git/refs/heads/…`, a repo via `gh repo delete`, a label
+   via `gh label delete` / `gh api -X DELETE …/labels/…`, …) ask; unknown or
+   ambiguous forms defer. The branch is resolved with
    `git symbolic-ref` (the session cwd for Bash, the file's own repo for edits).
 5. **Combine** the segment verdicts: any `ask` → ask; else every segment must be
    recognized-safe → allow; else defer. A segment is recognized-safe when it's a

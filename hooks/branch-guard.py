@@ -115,6 +115,19 @@ READONLY_GH = frozenset({
     ('status', ''),
 })
 
+# `gh <sub> delete` subcommands that REMOVE a resource — destructive, so ask
+# (mirrors the git destructive tier; `confirm()` upgrades this to deny in
+# non-interactive modes). Each maps to a noun for the prompt. `gh repo delete`
+# drops an entire repository; `gh label delete` drops a label. Branch deletion
+# (`gh pr merge|close --delete-branch`, `gh api -X DELETE …/git/refs/…`) is
+# handled separately because it's flag-/path-driven, not a subcommand name.
+# Other destructive gh deletes (release/secret/variable/gist/cache/ruleset, and
+# repo deletion via `gh api`) still defer — see the backlog before widening.
+DESTRUCTIVE_GH = {
+    ('repo', 'delete'): 'repository',
+    ('label', 'delete'): 'label',
+}
+
 # `gh api` options that consume a SEPARATE following value token, so the value
 # isn't re-read as another option. (`--opt=value` and attached short forms like
 # `-XPOST` are a single token and need no entry.)
@@ -643,19 +656,25 @@ def classify_gh_api(args):
             i += 2
             continue
         i += 1
-    if method.upper() in ('GET', 'HEAD'):
+    if method.upper() == 'GET' or method.upper() == 'HEAD':
         return ('allow', None)
-    # Deleting a git ref (branch/tag) via the REST API is destructive — ask
-    # rather than defer, mirroring `git branch -D` / `git push --delete`. The
-    # canonical endpoint is `DELETE /repos/{o}/{r}/git/refs/heads/{branch}`.
-    if method.upper() == 'DELETE' and any('git/refs/' in a for a in args):
-        return ('ask', "`gh api` deletes a git ref (branch/tag) — confirm before proceeding.")
+    # A DELETE against a recognizable destructive endpoint is escalated from
+    # defer to ask (mirrors the git destructive tier). The canonical branch
+    # endpoint is `DELETE /repos/{o}/{r}/git/refs/heads/{branch}`; a label is
+    # `DELETE /repos/{o}/{r}/labels/{name}`. Repo deletion via api
+    # (`DELETE /repos/{o}/{r}`) and other resource deletes still defer — see
+    # the backlog; matching them needs deliberate path parsing.
+    if method.upper() == 'DELETE':
+        if any('git/refs/' in a for a in args):
+            return ('ask', "`gh api` deletes a git ref (branch/tag) — confirm before proceeding.")
+        if any('labels/' in a for a in args):
+            return ('ask', "`gh api` deletes a label — confirm before proceeding.")
     return ('defer', None)
 
 
 def classify_gh(sub, args):
-    """Verdict for a `gh <sub>` command: allow read-only ones, ask on branch
-    deletion, defer the rest."""
+    """Verdict for a `gh <sub>` command: allow read-only ones, ask on
+    destructive deletes (repo/label/branch), defer the rest."""
     if sub == 'api':
         return classify_gh_api(args)
     pos = [a for a in args if not a.startswith('-')]
@@ -665,6 +684,10 @@ def classify_gh(sub, args):
     if sub == 'pr' and subsub in ('merge', 'close') and (
             '--delete-branch' in args or 'd' in short_flag_letters(args)):
         return ('ask', "`gh pr {} --delete-branch` deletes the branch — confirm before proceeding.".format(subsub))
+    # `gh repo delete` / `gh label delete` remove a resource — destructive.
+    noun = DESTRUCTIVE_GH.get((sub, subsub))
+    if noun is not None:
+        return ('ask', "`gh {} {}` deletes a {} — confirm before proceeding.".format(sub, subsub, noun))
     if (sub, subsub) in READONLY_GH or (sub, '') in READONLY_GH:
         return ('allow', None)
     return ('defer', None)

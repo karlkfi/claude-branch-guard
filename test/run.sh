@@ -311,20 +311,31 @@ for c in "gh api repos/o/r" "gh api repos/o/r --jq .name" \
   check "gh api GET: $c -> allow" allow "$(decision_for "$(bash_cmd "$c")" "$WORK")"
 done
 for c in "gh api -X POST repos/o/r/issues" "gh api --method=PATCH repos/o/r" \
-         "gh api -XDELETE repos/o/r/labels/x" "gh api repos/o/r -f title=x" \
+         "gh api repos/o/r -f title=x" \
          "gh api repos/o/r -F n=1" "gh api repos/o/r --field title=x" \
          "gh api --input body.json repos/o/r" "gh api graphql -f query=x"; do
   check "gh api write: $c -> none (defer)" none "$(decision_for "$(bash_cmd "$c")" "$WORK")"
 done
-# 17d. Deleting a branch via gh is destructive — ask, not defer (mirrors
-#      `git branch -D` / `git push --delete`). Covers the gh-api refs endpoint
-#      (all method spellings) and the `--delete-branch`/`-d` flag on pr merge/close.
+# A non-ref, non-label DELETE via the API still defers (e.g. unfollow); repo
+# deletion via api is not yet matched (backlog).
+for c in "gh api -X DELETE user/following/x" "gh api -XDELETE repos/o/r"; do
+  check "gh api other delete: $c -> none (defer)" none "$(decision_for "$(bash_cmd "$c")" "$WORK")"
+done
+# 17d. Destructive gh deletes are escalated to ask (mirrors the git destructive
+#      tier: `git branch -D` / `git push --delete`). Branch: the api refs
+#      endpoint (all method spellings) and `--delete-branch`/`-d` on pr
+#      merge/close. Resource: `gh repo delete`, `gh label delete`, and a label
+#      delete via the api labels endpoint.
 for c in "gh api -X DELETE repos/o/r/git/refs/heads/feature-x" \
          "gh api -XDELETE repos/o/r/git/refs/heads/main" \
          "gh api --method DELETE repos/o/r/git/refs/tags/v1" \
          "gh pr merge 5 --delete-branch" "gh pr merge 5 -d" \
-         "gh pr close 5 --delete-branch" "gh pr close 5 -d"; do
-  check "gh branch delete: $c -> ask" ask "$(decision_for "$(bash_cmd "$c")" "$WORK")"
+         "gh pr close 5 --delete-branch" "gh pr close 5 -d" \
+         "gh repo delete owner/repo" "gh repo delete owner/repo --yes" \
+         "gh label delete bug" "gh label delete bug --yes" \
+         "gh api -XDELETE repos/o/r/labels/bug" \
+         "gh api -X DELETE repos/o/r/labels/wont%20fix"; do
+  check "gh destructive delete: $c -> ask" ask "$(decision_for "$(bash_cmd "$c")" "$WORK")"
 done
 
 # 18. Shell-substitution bypass guard: a would-be `allow` defers when a raw
