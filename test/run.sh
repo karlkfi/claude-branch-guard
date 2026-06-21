@@ -8,7 +8,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 HOOK="$REPO_ROOT/hooks/branch-guard.py"
-WORK="$REPO_ROOT/tmp/test-repo"
+
+# Each run gets its own throwaway repo under tmp/ so concurrent or back-to-back
+# invocations never share (and clobber) a working dir. The EXIT trap removes
+# only this run's dir — no blanket `rm -rf tmp` that would nuke a sibling run.
+mkdir -p "$REPO_ROOT/tmp"
+WORK="$(mktemp -d "$REPO_ROOT/tmp/test-repo.XXXXXX")"
 
 # Keep tests hermetic regardless of the caller's shell.
 unset BRANCH_GUARD_PUSH_POLICY
