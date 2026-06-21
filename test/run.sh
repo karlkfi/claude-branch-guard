@@ -27,8 +27,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 setup_repo() {
-  rm -rf "$WORK"
-  mkdir -p "$WORK"
+  # $WORK was just created by mktemp -d; no need to clear it first.
   git -C "$WORK" init -q -b main
   git -C "$WORK" config user.name "Test"
   git -C "$WORK" config user.email "test@example.com"
