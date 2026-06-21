@@ -326,8 +326,9 @@ done
 #      destructive tier: `git branch -D` / `git push --delete`). Branch: the api
 #      refs endpoint (all method spellings) and `--delete-branch`/`-d` on pr
 #      merge/close. Resource: native `gh <sub> delete` subcommands
-#      (repo/label/release/secret/variable/gist/cache, plus the `remove` alias
-#      for secret/variable and `gh workflow disable`), a label/repo delete via
+#      (repo/label/release/secret/variable/gist/cache, the `release delete-asset`
+#      form, plus the `remove` alias for secret/variable and `gh workflow
+#      disable`), a label/repo delete via
 #      the api, and a repo delete via the api refs/labels/repos endpoints.
 for c in "gh api -X DELETE repos/o/r/git/refs/heads/feature-x" \
          "gh api -XDELETE repos/o/r/git/refs/heads/main" \
@@ -337,6 +338,7 @@ for c in "gh api -X DELETE repos/o/r/git/refs/heads/feature-x" \
          "gh repo delete owner/repo" "gh repo delete owner/repo --yes" \
          "gh label delete bug" "gh label delete bug --yes" \
          "gh release delete v1" "gh release delete v1 --yes" \
+         "gh release delete-asset v1 file.zip" \
          "gh secret delete TOKEN" "gh secret remove TOKEN" \
          "gh variable delete VAR" "gh variable remove VAR" \
          "gh gist delete abc123" "gh cache delete 42" "gh cache delete --all" \

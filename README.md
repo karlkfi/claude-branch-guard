@@ -88,7 +88,7 @@ the default `strict` [push policy](#push-guard).
 | `git branch -D old` | **ask** |
 | `gh pr merge 5 --delete-branch` / `gh pr close 5 -d` *(deletes the branch)* | **ask** |
 | `gh repo delete owner/repo` / `gh label delete bug` *(deletes a resource)* | **ask** |
-| `gh release delete v1` / `gh secret delete X` / `gh variable delete Y` / `gh gist delete abc` / `gh cache delete 1` *(deletes a resource; `secret`/`variable` also via the `remove` alias)* | **ask** |
+| `gh release delete v1` / `gh release delete-asset v1 file.zip` / `gh secret delete X` / `gh variable delete Y` / `gh gist delete abc` / `gh cache delete 1` *(deletes a resource; `secret`/`variable` also via the `remove` alias)* | **ask** |
 | `gh workflow disable ci.yml` *(disables a workflow)* | **ask** |
 | `gh api -X DELETE …/git/refs/heads/feature-x` *(deletes a branch/tag ref)* | **ask** |
 | `gh api -X DELETE …/labels/bug` *(deletes a label)* | **ask** |
@@ -308,7 +308,8 @@ update step and restart.
    `gh api -X DELETE …/git/refs/heads/…`; a repo via `gh repo delete` or
    `gh api -X DELETE repos/{o}/{r}`; a label via `gh label delete` /
    `gh api -X DELETE …/labels/…`; a release/secret/variable/gist/cache via
-   `gh <sub> delete` (`secret`/`variable` also accept `remove`); a workflow via
+   `gh <sub> delete` (`secret`/`variable` also accept `remove`; a release asset
+   via `gh release delete-asset`); a workflow via
    `gh workflow disable`) ask; unknown or
    ambiguous forms defer. The branch is resolved with
    `git symbolic-ref` (the session cwd for Bash, the file's own repo for edits).

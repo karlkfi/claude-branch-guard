@@ -129,6 +129,7 @@ DESTRUCTIVE_GH = {
     ('repo', 'delete'): 'deletes a repository',
     ('label', 'delete'): 'deletes a label',
     ('release', 'delete'): 'deletes a release',
+    ('release', 'delete-asset'): 'deletes a release asset',
     ('secret', 'delete'): 'deletes a secret',
     ('secret', 'remove'): 'deletes a secret',
     ('variable', 'delete'): 'deletes a variable',
