@@ -316,16 +316,19 @@ for c in "gh api -X POST repos/o/r/issues" "gh api --method=PATCH repos/o/r" \
          "gh api --input body.json repos/o/r" "gh api graphql -f query=x"; do
   check "gh api write: $c -> none (defer)" none "$(decision_for "$(bash_cmd "$c")" "$WORK")"
 done
-# A non-ref, non-label DELETE via the API still defers (e.g. unfollow); repo
-# deletion via api is not yet matched (backlog).
-for c in "gh api -X DELETE user/following/x" "gh api -XDELETE repos/o/r"; do
+# A non-repo, non-ref, non-label DELETE via the API still defers (e.g. unfollow,
+# or a sub-resource path that isn't an exact `repos/{o}/{r}`).
+for c in "gh api -X DELETE user/following/x" \
+         "gh api -X DELETE repos/o/r/issues/comments/1"; do
   check "gh api other delete: $c -> none (defer)" none "$(decision_for "$(bash_cmd "$c")" "$WORK")"
 done
-# 17d. Destructive gh deletes are escalated to ask (mirrors the git destructive
-#      tier: `git branch -D` / `git push --delete`). Branch: the api refs
-#      endpoint (all method spellings) and `--delete-branch`/`-d` on pr
-#      merge/close. Resource: `gh repo delete`, `gh label delete`, and a label
-#      delete via the api labels endpoint.
+# 17d. Destructive gh deletes/disables are escalated to ask (mirrors the git
+#      destructive tier: `git branch -D` / `git push --delete`). Branch: the api
+#      refs endpoint (all method spellings) and `--delete-branch`/`-d` on pr
+#      merge/close. Resource: native `gh <sub> delete` subcommands
+#      (repo/label/release/secret/variable/gist/cache, plus the `remove` alias
+#      for secret/variable and `gh workflow disable`), a label/repo delete via
+#      the api, and a repo delete via the api refs/labels/repos endpoints.
 for c in "gh api -X DELETE repos/o/r/git/refs/heads/feature-x" \
          "gh api -XDELETE repos/o/r/git/refs/heads/main" \
          "gh api --method DELETE repos/o/r/git/refs/tags/v1" \
@@ -333,8 +336,14 @@ for c in "gh api -X DELETE repos/o/r/git/refs/heads/feature-x" \
          "gh pr close 5 --delete-branch" "gh pr close 5 -d" \
          "gh repo delete owner/repo" "gh repo delete owner/repo --yes" \
          "gh label delete bug" "gh label delete bug --yes" \
+         "gh release delete v1" "gh release delete v1 --yes" \
+         "gh secret delete TOKEN" "gh secret remove TOKEN" \
+         "gh variable delete VAR" "gh variable remove VAR" \
+         "gh gist delete abc123" "gh cache delete 42" "gh cache delete --all" \
+         "gh workflow disable ci.yml" \
          "gh api -XDELETE repos/o/r/labels/bug" \
-         "gh api -X DELETE repos/o/r/labels/wont%20fix"; do
+         "gh api -X DELETE repos/o/r/labels/wont%20fix" \
+         "gh api -X DELETE repos/o/r" "gh api -XDELETE /repos/o/r"; do
   check "gh destructive delete: $c -> ask" ask "$(decision_for "$(bash_cmd "$c")" "$WORK")"
 done
 

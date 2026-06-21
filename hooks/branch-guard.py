@@ -115,17 +115,27 @@ READONLY_GH = frozenset({
     ('status', ''),
 })
 
-# `gh <sub> delete` subcommands that REMOVE a resource — destructive, so ask
-# (mirrors the git destructive tier; `confirm()` upgrades this to deny in
-# non-interactive modes). Each maps to a noun for the prompt. `gh repo delete`
-# drops an entire repository; `gh label delete` drops a label. Branch deletion
-# (`gh pr merge|close --delete-branch`, `gh api -X DELETE …/git/refs/…`) is
-# handled separately because it's flag-/path-driven, not a subcommand name.
-# Other destructive gh deletes (release/secret/variable/gist/cache/ruleset, and
-# repo deletion via `gh api`) still defer — see the backlog before widening.
+# `gh <sub> <subsub>` pairs that REMOVE or disable a resource — destructive, so
+# ask (mirrors the git destructive tier; `confirm()` upgrades this to deny in
+# non-interactive modes). Each maps to the action phrase used in the prompt
+# (`gh repo delete` drops an entire repository; `gh workflow disable` stops a
+# workflow from running). `secret`/`variable` accept `remove` as an alias for
+# `delete`, so both spellings are listed. `gh ruleset` has no delete subcommand,
+# so it's deliberately absent. Branch deletion (`gh pr merge|close
+# --delete-branch`, `gh api -X DELETE …/git/refs/…`) and repo deletion via the
+# api (`gh api -X DELETE repos/{o}/{r}`) are handled separately because they're
+# flag-/path-driven, not a subcommand name.
 DESTRUCTIVE_GH = {
-    ('repo', 'delete'): 'repository',
-    ('label', 'delete'): 'label',
+    ('repo', 'delete'): 'deletes a repository',
+    ('label', 'delete'): 'deletes a label',
+    ('release', 'delete'): 'deletes a release',
+    ('secret', 'delete'): 'deletes a secret',
+    ('secret', 'remove'): 'deletes a secret',
+    ('variable', 'delete'): 'deletes a variable',
+    ('variable', 'remove'): 'deletes a variable',
+    ('gist', 'delete'): 'deletes a gist',
+    ('cache', 'delete'): 'deletes a cache',
+    ('workflow', 'disable'): 'disables a workflow',
 }
 
 # `gh api` options that consume a SEPARATE following value token, so the value
@@ -630,6 +640,7 @@ def classify_gh_api(args):
     defers rather than allowing. Read-only modifiers (`--jq`, `--header`,
     `--paginate`, `--cache`, …) don't disqualify."""
     method = 'GET'
+    positionals = []
     i = 0
     while i < len(args):
         t = args[i]
@@ -655,26 +666,36 @@ def classify_gh_api(args):
         if t in GH_API_VALUE_OPTS:        # skip the value of other value-opts
             i += 2
             continue
+        if not t.startswith('-'):
+            positionals.append(t)        # the endpoint path is the first one
         i += 1
     if method.upper() == 'GET' or method.upper() == 'HEAD':
         return ('allow', None)
     # A DELETE against a recognizable destructive endpoint is escalated from
     # defer to ask (mirrors the git destructive tier). The canonical branch
     # endpoint is `DELETE /repos/{o}/{r}/git/refs/heads/{branch}`; a label is
-    # `DELETE /repos/{o}/{r}/labels/{name}`. Repo deletion via api
-    # (`DELETE /repos/{o}/{r}`) and other resource deletes still defer — see
-    # the backlog; matching them needs deliberate path parsing.
+    # `DELETE /repos/{o}/{r}/labels/{name}`; a whole repository is
+    # `DELETE /repos/{o}/{r}` — exactly three path segments. Repo deletion is
+    # matched by parsing the endpoint path (not a substring: a bare `repos/`
+    # would also hit issue/label/sub-resource paths that aren't a repo delete),
+    # so only the exact three-segment `repos/{o}/{r}` escalates. Other deletes
+    # (`DELETE /user/following/x`, …) still defer.
     if method.upper() == 'DELETE':
         if any('git/refs/' in a for a in args):
             return ('ask', "`gh api` deletes a git ref (branch/tag) — confirm before proceeding.")
         if any('labels/' in a for a in args):
             return ('ask', "`gh api` deletes a label — confirm before proceeding.")
+        endpoint = positionals[0] if positionals else ''
+        segs = [s for s in endpoint.split('/') if s]
+        if len(segs) == 3 and segs[0] == 'repos':
+            return ('ask', "`gh api` deletes a repository — confirm before proceeding.")
     return ('defer', None)
 
 
 def classify_gh(sub, args):
     """Verdict for a `gh <sub>` command: allow read-only ones, ask on
-    destructive deletes (repo/label/branch), defer the rest."""
+    destructive deletes/disables (repo/label/release/secret/variable/gist/cache,
+    workflow disable, branch), defer the rest."""
     if sub == 'api':
         return classify_gh_api(args)
     pos = [a for a in args if not a.startswith('-')]
@@ -684,10 +705,11 @@ def classify_gh(sub, args):
     if sub == 'pr' and subsub in ('merge', 'close') and (
             '--delete-branch' in args or 'd' in short_flag_letters(args)):
         return ('ask', "`gh pr {} --delete-branch` deletes the branch — confirm before proceeding.".format(subsub))
-    # `gh repo delete` / `gh label delete` remove a resource — destructive.
-    noun = DESTRUCTIVE_GH.get((sub, subsub))
-    if noun is not None:
-        return ('ask', "`gh {} {}` deletes a {} — confirm before proceeding.".format(sub, subsub, noun))
+    # `gh repo delete`, `gh release delete`, `gh workflow disable`, … remove or
+    # disable a resource — destructive.
+    action = DESTRUCTIVE_GH.get((sub, subsub))
+    if action is not None:
+        return ('ask', "`gh {} {}` {} — confirm before proceeding.".format(sub, subsub, action))
     if (sub, subsub) in READONLY_GH or (sub, '') in READONLY_GH:
         return ('allow', None)
     return ('defer', None)
