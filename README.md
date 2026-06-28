@@ -220,6 +220,9 @@ To verify, ask Claude to run `git commit -m test` on a checkout sitting on `main
 — you should see a permission prompt citing the protected branch. Then ask it to
 commit on a `claude/*` or feature branch; it should run without prompting.
 
+**Already installed?** New releases don't install themselves — see
+[Upgrade](#upgrade) for how to pull the latest version.
+
 ### Local install (development)
 
 To run the plugin straight from a checkout instead of the GitHub marketplace,
