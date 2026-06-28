@@ -162,7 +162,10 @@ instead of a prompt no one can answer. See [Configuration](#configuration).
 The edit check resolves the branch of **the file's own repository**
 (`git -C <dir-of-file>`), not the session's working directory — so it catches an
 edit to a file checked out on `main` (e.g. a parent repo path) even while your
-session's cwd is a feature-branch worktree.
+session's cwd is a feature-branch worktree. A **relative** `file_path` is first
+resolved against the session's `cwd` (from the hook payload), so an edit inside a
+nested worktree resolves to the worktree's branch even when the hook process runs
+from the parent checkout — not falsely against the parent's `main`.
 
 ## Push guard
 

@@ -853,7 +853,13 @@ def main():
         file_path = tool_input.get('notebook_path') or tool_input.get('file_path') or ''
         if not file_path:
             return
-        branch = current_branch(os.path.dirname(file_path) or '.')
+        # Resolve a relative file_path against the payload cwd (the session's
+        # worktree), not the hook process's own cwd — Claude Code may launch the
+        # hook from the parent/main checkout, so dirname() of a relative path
+        # would land in the wrong repo and resolve the wrong branch.
+        cwd = data.get('cwd') or os.getcwd()
+        abs_path = file_path if os.path.isabs(file_path) else os.path.join(cwd, file_path)
+        branch = current_branch(os.path.dirname(abs_path) or cwd)
         if branch is None:
             return
         if is_protected(branch):

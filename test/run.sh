@@ -122,6 +122,21 @@ git -C "$WORK" checkout -q claude/x
 check "notebook edit on claude/x -> none" none \
   "$(decision_for "{\"tool_name\":\"NotebookEdit\",\"tool_input\":{\"notebook_path\":\"$WORK/file.txt\"}}" "$REPO_ROOT")"
 
+# 5c. Nested worktree: a RELATIVE file_path resolves against the payload `cwd`
+#     (the session's worktree), not the hook process's own cwd. Here the process
+#     runs from the main checkout (on `main`) while the payload cwd points at a
+#     worktree on the feature branch — the edit must NOT falsely flag `main`.
+git -C "$WORK" checkout -q main
+WT="$WORK/.claude/worktrees/wt"
+git -C "$WORK" worktree add -q "$WT" claude/x
+check "edit rel path honors payload cwd (worktree on claude/x) -> none" none \
+  "$(decision_for "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"file.txt\"},\"cwd\":\"$WT\"}" "$WORK")"
+# And the converse still catches main when the payload cwd is the main checkout.
+check "edit rel path honors payload cwd (main checkout) -> ask" ask \
+  "$(decision_for "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"file.txt\"},\"cwd\":\"$WORK\"}" "$REPO_ROOT")"
+git -C "$WORK" worktree remove -f "$WT"
+git -C "$WORK" checkout -q claude/x
+
 # 6. unknown tool / missing file_path -> no decision
 check "unknown tool -> none" none \
   "$(decision_for '{"tool_name":"Read","tool_input":{"file_path":"/etc/hosts"}}' "$REPO_ROOT")"
