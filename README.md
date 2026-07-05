@@ -189,6 +189,16 @@ allowing. For a hard guarantee that no push reaches a protected branch —
 regardless of how it's invoked or from which machine — pair it with a git
 `pre-push` hook and/or server-side branch protection.
 
+**Auto-allowed pushes and session wake-ups.** Under `strict`, a push of the
+worktree branch runs without a prompt. If a session can be woken by
+third-party-writable input — e.g. Claude Desktop's **Autofix pull requests**
+setting, which resumes a session on PR review comments, a public-repo injection
+channel — that same auto-allowed push is the permission an injected wake-up would
+use to push commits unattended. This is bounded: the push lands on an unmerged
+topic branch and is reversible, so the effective security boundary shifts to
+**PR-merge review**. With autofix enabled, keep auto-merge off and treat human
+merge review as the control this auto-allow leans on.
+
 ## Install
 
 Install on any Claude Code surface that runs plugin `PreToolUse` hooks — the CLI,
