@@ -78,6 +78,7 @@ the default `strict` [push policy](#push-guard).
 | `git log \| head` / `gh pr checks 123 \| head -20` / `git diff --stat \| tail -n 5` *(piped to a read-only filter)* | allow |
 | `git log --oneline ; echo "---" ; git status` *(label/no-op between git reads)* | allow |
 | `gh pr view "$(git branch --show-current)"` / `git -C "$(git rev-parse --show-toplevel)" status` / `git log "$(pwd)"` *(pure read-only substitution)* | allow |
+| `git commit -F- <<'EOF' … EOF` *(feature branch; heredoc body is opaque data)* | allow |
 | `git fetch 2>/dev/null` / `git log >/dev/null 2>&1` *(discard redirect / fd-dup)* | allow |
 | `git pull --ff-only` | allow |
 | `git commit -m "fix"` *(on `main`)* | **ask** |
@@ -173,6 +174,19 @@ chain — it never turns a destructive verdict or a protected-branch `ask` into 
 `allow` (`git commit -m "$(pwd)"` on `main` still asks). A non-git segment still
 can't ride along, so `cd "$(git rev-parse --show-toplevel)" && git status` keeps
 deferring (the `cd` is workspace-guard's domain).
+
+Heredoc bodies are treated as **opaque data**, not command segments. A body
+(`git commit -F- <<'EOF' … EOF`, `gh pr create --body-file - <<'EOF' … EOF`) is
+dropped before the command is lexed, so its lines can't split into foreign
+segments and drop the surrounding git chain to a prompt (or unbalance the lexer
+with an apostrophe). The operator line and anything after the terminator still
+classify normally, so a `git push origin main` after the heredoc still asks. One
+security nuance: the shell expands an **unquoted** heredoc body, so a command
+substitution in it runs (`<<EOF … $(rm -rf /) … EOF`). Such a body is *not*
+dropped — it's left in the stream so the substitution guard defers. A **quoted**
+delimiter (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) suppresses all expansion, so its body
+is inert and always safe to drop. An unterminated or unparseable heredoc is left
+unchanged (the body lexes and the command defers) rather than guessed at.
 
 The **ask** rows assume an interactive or `default`-mode session. In a
 non-interactive mode (`auto`, `dontAsk`, `bypassPermissions`) the same commands
@@ -381,6 +395,11 @@ update step and restart.
 
 ## How it works
 
+0. **Strip heredoc bodies** first, quote-aware, so a heredoc's (data) contents
+   aren't lexed as command segments (`git commit -F- <<'EOF' … EOF`). A quoted
+   delimiter makes the body inert and always safe to drop; an unquoted body that
+   the shell would expand (a command substitution in it runs) is kept so the
+   substitution guard still defers; an unterminated one is left unchanged.
 1. **Tokenize** the command with Python's `shlex` (POSIX mode, punctuation
    grouping) so quotes are respected and shell operators (`|`, `&&`, `>`, `;`,
    newlines) become their own tokens.

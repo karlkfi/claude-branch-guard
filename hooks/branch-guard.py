@@ -23,6 +23,12 @@ would-be `allow` to defer — except a small registry of provably pure ones
 which are treated as substitution-free so idioms like
 `gh pr view "$(git branch --show-current)"` stay auto-approvable.
 
+Heredoc bodies are dropped before lexing (`strip_heredocs`) so their (data)
+contents aren't parsed as command segments — a `git commit -F- <<'EOF' … EOF`
+stays auto-approvable instead of deferring on the body's foreign-looking lines.
+An unquoted-delimiter body that the shell would expand (a command substitution
+in it runs) is kept in the stream so the substitution guard still defers.
+
 Also guards file edits (Edit/Write/MultiEdit/NotebookEdit) against the branch of
 the file's own repository, and `git push` according to BRANCH_GUARD_PUSH_POLICY.
 
@@ -264,6 +270,145 @@ def split_newline_separators(tokens):
         else:
             out.append(t)
     return out
+
+
+def _has_body_substitution(line):
+    """True if a heredoc body line contains a construct the shell would execute
+    when the delimiter is UNQUOTED: command substitution (`$(…)`, `` `…` ``) or
+    process substitution (`<(…)`/`>(…)`). Mirrors `has_shell_substitution`'s
+    intent at the raw-string level (before tokenization). Deliberately coarse —
+    `$((` arithmetic is matched by `$(` too, which only makes us bail toward the
+    safe (unstripped -> defer) path, never toward allowing."""
+    return '$(' in line or '`' in line or '<(' in line or '>(' in line
+
+
+def _read_heredoc_delim(cmd, i):
+    """Read a heredoc delimiter word starting at cmd[i]. Returns
+    (delim, quoted, new_i): the delimiter after quote removal, whether any part
+    was quoted or escaped (bash suppresses all body expansion for a quoted
+    delimiter, making the body inert data), and the index just past the word.
+    The word ends at unquoted whitespace or a shell metacharacter. Returns
+    (None, False, i) when no delimiter word is present (`<<` at end of line)."""
+    n = len(cmd)
+    chars, quoted, started, q = [], False, False, None
+    while i < n:
+        c = cmd[i]
+        if q is not None:
+            if c == q:
+                q = None; i += 1; continue
+            if q == '"' and c == '\\' and i + 1 < n:
+                chars.append(cmd[i + 1]); i += 2; continue
+            chars.append(c); i += 1; continue
+        if c == '\\' and i + 1 < n:
+            chars.append(cmd[i + 1]); quoted = started = True; i += 2; continue
+        if c in ('"', "'"):
+            q = c; quoted = started = True; i += 1; continue
+        if c in ' \t\n' or c in ';&|<>()':
+            break
+        chars.append(c); started = True; i += 1
+    if not started:
+        return None, False, i
+    return ''.join(chars), quoted, i
+
+
+def _consume_heredoc_bodies(cmd, i, pending):
+    """Advance past the body lines of each queued heredoc (in order), returning
+    the index just after the last terminator line — or None to signal the caller
+    to leave the command unstripped. A body ends at the first line that, after
+    stripping leading tabs for a `<<-` heredoc, equals the delimiter exactly
+    (bash's rule). Returns None when a heredoc runs to EOF with no terminator, or
+    when an UNQUOTED-delimiter body contains a command/process substitution the
+    shell would execute — in that case the body must stay in the stream so the
+    normal substitution guard sees it and defers (fail safe)."""
+    n = len(cmd)
+    for delim, strip_tabs, quoted in pending:
+        found = False
+        while i < n:
+            end = cmd.find('\n', i)
+            line, nxt = (cmd[i:], n) if end == -1 else (cmd[i:end], end + 1)
+            candidate = line.lstrip('\t') if strip_tabs else line
+            if candidate == delim:
+                i = nxt; found = True
+                break
+            if not quoted and _has_body_substitution(line):
+                return None
+            i = nxt
+        if not found:
+            return None
+    return i
+
+
+def strip_heredocs(cmd):
+    """Remove heredoc bodies from a shell command so their contents aren't lexed
+    as command segments. A multi-line heredoc body would otherwise split into
+    foreign segments (or contain an apostrophe that unbalances `shlex`), dropping
+    an all-git chain from `allow` to a prompt (or a parse failure). Detects real
+    `<<WORD` / `<<-WORD` operators (quote- and escape-aware, so a `<<` inside a
+    string or a `<<<` here-string is not one) and drops each operator together
+    with its body up to the terminator line; the rest of the command line — the
+    git/gh invocation and anything after the terminator — is left to classify
+    normally. Dropping the whole `<<WORD` operator (rather than re-emitting it)
+    sidesteps `shlex`'s tokenization of `<<-` and quoted delimiters; the input
+    redirection is irrelevant to git/gh classification.
+
+    Security: a heredoc body is executed by the shell only when its delimiter is
+    UNQUOTED — bash then expands the body, so a command substitution in it runs.
+    A QUOTED delimiter (`<<'EOF'`, `<<"EOF"`, `<<\\EOF`) suppresses all expansion,
+    so the body is inert data and is always safe to drop. An unquoted body is
+    dropped only when it contains no command/process substitution; otherwise —
+    and on any parse uncertainty (unterminated heredoc, missing delimiter) — the
+    original command is returned unchanged so the normal pipeline sees it and
+    defers (fail safe)."""
+    if '<<' not in cmd:
+        return cmd
+    n = len(cmd)
+    out = []
+    i = 0
+    quote = None
+    pending = []          # queued (delim, strip_tabs, quoted) awaiting bodies
+    while i < n:
+        c = cmd[i]
+        if quote is not None:                       # inside '…' or "…"
+            out.append(c)
+            if quote == '"' and c == '\\' and i + 1 < n:
+                out.append(cmd[i + 1]); i += 2; continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c == '\\':                               # escaped next char
+            out.append(c)
+            if i + 1 < n:
+                out.append(cmd[i + 1]); i += 2; continue
+            i += 1; continue
+        if c in ('"', "'"):
+            quote = c; out.append(c); i += 1; continue
+        if cmd.startswith('<<<', i):                # here-string: no body
+            out.append('<<<'); i += 3; continue
+        if cmd.startswith('<<', i):                 # heredoc operator: drop it
+            j = i + 2
+            if j < n and cmd[j] == '-':
+                strip_tabs = True; j += 1
+            else:
+                strip_tabs = False
+            while j < n and cmd[j] in ' \t':
+                j += 1
+            delim, quoted, j = _read_heredoc_delim(cmd, j)
+            if delim is None:
+                return cmd                          # no delimiter -> leave as-is
+            pending.append((delim, strip_tabs, quoted))
+            i = j
+            continue
+        out.append(c); i += 1
+        if c == '\n' and pending:                   # bodies follow the newline
+            r = _consume_heredoc_bodies(cmd, i, pending)
+            if r is None:
+                return cmd                          # unterminated / unsafe body
+            i = r
+            pending = []
+    if pending:
+        return cmd                                  # operator with no body -> as-is
+    return ''.join(out)
 
 
 def tokenize(cmd):
@@ -877,6 +1022,10 @@ def main():
         cmd = tool_input.get('command') or ''
         if not cmd.strip():
             return
+        # Drop heredoc bodies before lexing so their (data) contents aren't
+        # parsed as command segments — a large heredoc would otherwise split
+        # into foreign segments and defer an all-git chain (see strip_heredocs).
+        cmd = strip_heredocs(cmd)
         try:
             tokens = tokenize(cmd)
         except ValueError:

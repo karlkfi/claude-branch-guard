@@ -577,5 +577,52 @@ check "git status && echo done && rm -rf foo -> none" none \
 check "git reset --hard ; echo done -> ask" ask \
   "$(decision_for "$(bash_cmd 'git reset --hard ; echo done')" "$WORK")"
 
+# ---------------------------------------------------------------------------
+# 23. Heredoc bodies are treated as opaque data, not command segments. A body
+#     (a quoted delimiter is always inert; an unquoted one with no substitution)
+#     is dropped before lexing, so an all-git chain wrapping a heredoc stays
+#     auto-approved instead of deferring on the body's foreign-looking lines.
+#     The operator line and anything after the terminator still classify.
+# hbash CMD -> a Bash payload with CMD json-encoded (CMD may contain newlines).
+hbash() { python3 -c 'import json,sys; print(json.dumps({"tool_name":"Bash","tool_input":{"command":sys.argv[1]}}))' "$1"; }
+
+git -C "$WORK" checkout -q claude/x
+# A quoted-delimiter body whose lines look like foreign segments (&&/;/rm) is
+# inert data -> the commit auto-approves.
+check "commit + quoted heredoc (foreign-looking body) -> allow" allow \
+  "$(decision_for "$(hbash "$(printf 'git commit -F- <<'"'"'EOF'"'"'\nfeat: x\n\n- a && b ; rm -rf /\nEOF')")" "$WORK")"
+# An unquoted delimiter with a plain body (no expansion vectors) also strips.
+check "commit + unquoted heredoc (plain body) -> allow" allow \
+  "$(decision_for "$(hbash "$(printf 'git commit -F- <<EOF\nfeat: x\nEOF')")" "$WORK")"
+# A <<- heredoc with a tab-indented terminator strips too.
+check "commit + <<- heredoc (indented terminator) -> allow" allow \
+  "$(decision_for "$(hbash "$(printf 'git commit -F- <<-'"'"'EOF'"'"'\n\tbody\n\tEOF')")" "$WORK")"
+# A command after the terminator still classifies: a push to main asks.
+check "heredoc body then push origin main -> ask" ask \
+  "$(decision_for "$(hbash "$(printf 'git commit -F- <<'"'"'EOF'"'"'\nmsg\nEOF\ngit push origin main')")" "$WORK")"
+# A real trailing command after the terminator can't ride along -> defer.
+check "heredoc body then rm -> none" none \
+  "$(decision_for "$(hbash "$(printf 'git commit -F- <<'"'"'EOF'"'"'\nmsg\nEOF\nrm -rf foo')")" "$WORK")"
+# SECURITY: an UNQUOTED body with a command substitution the shell would run is
+# NOT stripped (left in the stream) -> the substitution guard defers.
+check "unquoted heredoc body with substitution -> none (defer)" none \
+  "$(decision_for "$(hbash "$(printf 'git commit -F- <<EOF\n$(touch PWNED)\nEOF')")" "$WORK")"
+# A QUOTED delimiter suppresses expansion, so the same body is inert -> allow.
+check "quoted heredoc body with substitution (inert) -> allow" allow \
+  "$(decision_for "$(hbash "$(printf 'git commit -F- <<'"'"'EOF'"'"'\n$(touch PWNED)\nEOF')")" "$WORK")"
+# A heredoc feeding a NON-git command (body full of git-looking text) has no
+# git/gh segment once stripped -> defer (no false-positive prompt).
+check "cat heredoc with git-looking body -> none (defer)" none \
+  "$(decision_for "$(hbash "$(printf 'cat <<'"'"'EOF'"'"'\ngit push origin main\nEOF')")" "$WORK")"
+# An unterminated heredoc is left unchanged (fail safe): the body lexes and the
+# chain defers rather than silently allowing.
+check "unterminated heredoc -> none (defer)" none \
+  "$(decision_for "$(hbash "$(printf 'git commit -F- <<EOF\nbody with no terminator line')")" "$WORK")"
+# A commit wrapping a heredoc on main still asks (protected branch).
+git -C "$WORK" checkout -q main
+check "commit + heredoc on main -> ask" ask \
+  "$(decision_for "$(hbash "$(printf 'git commit -F- <<'"'"'EOF'"'"'\nmsg\nEOF')")" "$WORK")"
+git -C "$WORK" checkout -q claude/x
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]
