@@ -394,6 +394,46 @@ check "; separator -> none (defer)" none \
   "$(decision_for "$(bash_cmd 'git status; touch x')" "$WORK")"
 
 # ---------------------------------------------------------------------------
+# 18b. Pure-substitution registry: a quoted `$(…)` / backtick substitution whose
+#      inner command is a recognized pure/read-only one (PURE_SUBSTITUTIONS)
+#      does NOT drop an otherwise-auto-approvable git/gh chain to defer, while
+#      any other substitution keeps deferring. Payloads are built by hand (the
+#      commands carry double quotes, which bash_cmd doesn't escape) and are
+#      single-quoted so the test shell never expands the substitutions.
+git -C "$WORK" checkout -q claude/x
+# Pure substitution inside a quoted arg -> the chain still auto-approves.
+check 'gh pr view "$(git branch --show-current)" -> allow' allow \
+  "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"gh pr view \"$(git branch --show-current)\""}}' "$WORK")"
+check 'git -C "$(git rev-parse --show-toplevel)" status -> allow' allow \
+  "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git -C \"$(git rev-parse --show-toplevel)\" status"}}' "$WORK")"
+check 'git log "$(pwd)" -> allow' allow \
+  "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git log \"$(pwd)\""}}' "$WORK")"
+# Backtick spelling and trailing literal text after the substitution both allow.
+check 'git log "`pwd`" (backtick) -> allow' allow \
+  "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git log \"`pwd`\""}}' "$WORK")"
+check 'git -C "$(git rev-parse --show-toplevel)/sub" status -> allow' allow \
+  "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git -C \"$(git rev-parse --show-toplevel)/sub\" status"}}' "$WORK")"
+# A non-registry substitution still defers (only the tiny registry is exempt).
+check 'git log "$(git status)" -> none (not in registry)' none \
+  "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git log \"$(git status)\""}}' "$WORK")"
+# An appended command, an inner redirect, or a pure+impure pair keep deferring —
+# the structural match rejects anything but the exact pure command.
+check 'git commit -m "$(git branch --show-current; touch PWNED)" -> none' none \
+  "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git commit -m \"$(git branch --show-current; touch PWNED)\""}}' "$WORK")"
+check 'git log "$(git rev-parse --show-toplevel > f)" -> none (inner redirect)' none \
+  "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git log \"$(git rev-parse --show-toplevel > f)\""}}' "$WORK")"
+check 'git commit -m "$(pwd)$(touch PWNED)" -> none (pure + impure)' none \
+  "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git commit -m \"$(pwd)$(touch PWNED)\""}}' "$WORK")"
+# A pure substitution never overrides a protective ask: commit on main still asks.
+git -C "$WORK" checkout -q main
+check 'git commit -m "$(pwd)" on main -> ask' ask \
+  "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git commit -m \"$(pwd)\""}}' "$WORK")"
+git -C "$WORK" checkout -q claude/x
+# A non-git segment can't ride along even with a pure substitution (cd is nongit).
+check 'cd "$(git rev-parse --show-toplevel)" && git status -> none' none \
+  "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"cd \"$(git rev-parse --show-toplevel)\" && git status"}}' "$WORK")"
+
+# ---------------------------------------------------------------------------
 # 19. Pipe to a pure read-only filter: a recognized-safe git/gh segment piped
 #     into a pager/formatter (head/tail/wc/…) stays `allow` instead of
 #     deferring. A filter with a file positional, a write option, a non-filter

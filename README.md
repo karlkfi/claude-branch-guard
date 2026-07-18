@@ -77,6 +77,7 @@ the default `strict` [push policy](#push-guard).
 | `gh api repos/o/r` / `gh api -X GET …` *(a read — default or explicit GET)* | allow |
 | `git log \| head` / `gh pr checks 123 \| head -20` / `git diff --stat \| tail -n 5` *(piped to a read-only filter)* | allow |
 | `git log --oneline ; echo "---" ; git status` *(label/no-op between git reads)* | allow |
+| `gh pr view "$(git branch --show-current)"` / `git -C "$(git rev-parse --show-toplevel)" status` / `git log "$(pwd)"` *(pure read-only substitution)* | allow |
 | `git fetch 2>/dev/null` / `git log >/dev/null 2>&1` *(discard redirect / fd-dup)* | allow |
 | `git pull --ff-only` | allow |
 | `git commit -m "fix"` *(on `main`)* | **ask** |
@@ -102,7 +103,7 @@ the default `strict` [push policy](#push-guard).
 | `git status ; echo x > out.txt` *(benign segment writes a file)* | defer |
 | `git log \| cat file.txt` *(filter reads a file)* / `git status \| tee out` *(filter writes)* | defer |
 | `head -5` / `echo hi` *(no git/gh segment)* | defer |
-| `` git status `touch evil` `` / `git commit -m "$(touch evil)"` *(hidden command substitution)* | defer |
+| `` git status `touch evil` `` / `git commit -m "$(touch evil)"` *(hidden command substitution, not in the pure registry)* | defer |
 | `git status <(touch evil)` *(process substitution)* | defer |
 | `git checkout file.txt` *(ambiguous: branch vs. file)* | defer |
 | `git -c core.pager=cat log` *(inline-config escape hatch)* | defer |
@@ -117,6 +118,7 @@ git/gh invocation, so a trailing command can't ride along. The substitution rows
 defer for the same reason a level down — `` `…` ``, `$(…)`, and `<(…)`/`>(…)` run
 a command the classifier never sees (even inside a quoted argument or a redirect
 target like `` git diff > `evil` ``), so a would-be `allow` is downgraded to defer.
+(A tiny registry of provably pure substitutions is the one exception — see below.)
 An output redirect to a real file (`git log > out`, `echo x > out`) is treated the
 same way — it's a write side-effect the classifier can't otherwise see, so the
 segment is downgraded out of `allow`. This both hardens the read commands (a
@@ -153,6 +155,24 @@ closed: an output redirect to a real file (`echo evil > ~/.gitconfig`) downgrade
 the segment via the write check above, and a command substitution (`echo $(…)`)
 downgrades the whole command. As with filters, the command must still contain a
 git/gh segment (`echo hi` alone defers) and a protective `ask` still wins.
+
+A third relaxation covers a constant idiom: passing a repo path or branch name to
+a git/gh command via substitution. A `$(…)` or backtick substitution normally
+downgrades the whole command to defer, but a tiny hardcoded registry of **pure
+read-only substitutions** — `$(git rev-parse --show-toplevel)`,
+`$(git branch --show-current)`, and `$(pwd)` — is exempt, so
+`gh pr view "$(git branch --show-current)"` and
+`git -C "$(git rev-parse --show-toplevel)" status` auto-approve instead of
+prompting. The match is **structural**: the command inside the substitution must
+tokenize to exactly a registry entry with no extra argument, separator, redirect,
+or nested substitution — so `$(git branch --show-current; rm -rf x)`,
+`$(git rev-parse --show-toplevel > f)`, and `$(git status)` all keep deferring.
+Because the classifier reasons about the literal tokens and never resolves a
+substitution's output, this can only lift the defer on an already-safe git/gh
+chain — it never turns a destructive verdict or a protected-branch `ask` into an
+`allow` (`git commit -m "$(pwd)"` on `main` still asks). A non-git segment still
+can't ride along, so `cd "$(git rev-parse --show-toplevel)" && git status` keeps
+deferring (the `cd` is workspace-guard's domain).
 
 The **ask** rows assume an interactive or `default`-mode session. In a
 non-interactive mode (`auto`, `dontAsk`, `bypassPermissions`) the same commands
@@ -340,7 +360,10 @@ update step and restart.
    (`git -c core.pager='!sh …' log`), and a hidden command/process substitution
    in the raw token stream (`` `…` ``, `$(…)`, `<(…)`/`>(…)`, or an unrecognized
    operator run like `|&`) — checked over the raw tokens, before redirect targets
-   are dropped, so `` git diff > `evil` `` is caught too.
+   are dropped, so `` git diff > `evil` `` is caught too. A small registry of
+   provably pure substitutions (`$(git rev-parse --show-toplevel)`,
+   `$(git branch --show-current)`, `$(pwd)`) is exempt from that second downgrade
+   — matched structurally, so only the exact read-only command qualifies.
 6. **Fail safe** in non-interactive modes: a would-be `ask` is emitted as `deny`,
    since no human is present to answer the prompt.
 
@@ -371,6 +394,12 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   builds, file writes) in its own call. Two forms still drop a git+label chain to
   a prompt: redirecting output to a file (`echo x > f`, `git log > f`) and command
   substitution (`echo $(…)`).
+- **A few pure substitutions are exempt.** `$(git rev-parse --show-toplevel)`,
+  `$(git branch --show-current)`, and `$(pwd)` don't trip the substitution guard,
+  so `git -C "$(git rev-parse --show-toplevel)" status` and
+  `gh pr view "$(git branch --show-current)"` auto-approve. Any other `$(…)` (or
+  adding an argument/redirect inside these) still prompts — prefer these exact
+  forms.
 - **Expect a prompt for destructive commands** (`reset --hard`, `clean -f`,
   `branch -D`, `restore <path>`, `config --global`) — that's by design.
 ```
@@ -410,10 +439,13 @@ protected branch (main/master) or destructive git commands. To keep work flowing
 - Auto-approval is only ever withheld, never granted, by the shell-construct
   check: a command carrying a command/process substitution (`` `…` ``, `$(…)`,
   `<(…)`/`>(…)`) or an unrecognized operator run **defers** instead of
-  auto-approving, since those run code the classifier can't see. It is a
-  best-effort lexical check, not a sandbox — the filesystem boundary is
-  workspace-guard's job, and a hard guarantee belongs in a git `pre-push` hook
-  or server-side branch protection.
+  auto-approving, since those run code the classifier can't see. The one
+  exception is a tiny hardcoded registry of provably pure, read-only
+  substitutions (`$(git rev-parse --show-toplevel)`, `$(git branch --show-current)`,
+  `$(pwd)`), matched structurally so nothing else rides in. It is a best-effort
+  lexical check, not a sandbox — the filesystem boundary is workspace-guard's
+  job, and a hard guarantee belongs in a git `pre-push` hook or server-side
+  branch protection.
 - The push guard parses the command string, so unusual refspecs may not be
   classified (it asks/defers rather than allowing). Auto-approval is a
   convenience layer, not a security boundary — for hard guarantees use a git

@@ -17,6 +17,11 @@ git/gh invocation classified `allow`, a read-only pager piped after one
 non-git command can't ride along into an approval (`git status && rm -rf foo`
 defers rather than allows). A segment that writes a file via an output redirect
 (`git log > f`, `echo x > f`) is downgraded out of `allow` for the same reason.
+A command/process substitution (`` `…` ``, `$(…)`, `<(…)`) likewise downgrades a
+would-be `allow` to defer — except a small registry of provably pure ones
+(`$(git rev-parse --show-toplevel)`, `$(git branch --show-current)`, `$(pwd)`),
+which are treated as substitution-free so idioms like
+`gh pr view "$(git branch --show-current)"` stay auto-approvable.
 
 Also guards file edits (Edit/Write/MultiEdit/NotebookEdit) against the branch of
 the file's own repository, and `git push` according to BRANCH_GUARD_PUSH_POLICY.
@@ -201,6 +206,27 @@ FILTER_WRITE_OPT_RE = re.compile(r'^(-o|--output(=|$))')
 # `echo $(…)` both still defer).
 BENIGN_COMMANDS = frozenset({'echo', 'printf', 'true', 'false', ':'})
 
+# Command substitutions treated as PURE for chain classification. A `$(…)` /
+# backtick substitution (even inside a quoted argument) normally downgrades a
+# would-be `allow` to defer, because it runs a command the classifier never
+# inspects. The entries here are the narrow exceptions: each inner command is
+# read-only, side-effect-free, deterministic, and reveals nothing the git/gh
+# segments in the same chain couldn't already read — so a substitution matching
+# one of them does NOT force the chain to defer. Any OTHER substitution keeps
+# today's conservative behavior. Matched STRUCTURALLY (the inner command must
+# tokenize to exactly this tuple, with no separators/redirects — see
+# `is_pure_substitution`), never as a loose substring, so no extra argument or
+# chained command can ride inside a match. Kept deliberately tiny: this only
+# ever removes friction from an already-auto-approvable git/gh chain — the
+# per-segment classifier still runs, so it never turns an `ask`/destructive
+# verdict into an `allow`. Adding an entry needs the same scrutiny as a new
+# READONLY_GIT member: it must be provably side-effect-free.
+PURE_SUBSTITUTIONS = frozenset({
+    ('git', 'rev-parse', '--show-toplevel'),   # repo root path
+    ('git', 'branch', '--show-current'),        # current branch name
+    ('pwd',),                                   # working directory path
+})
+
 # `git push` options that consume a separate following value token.
 PUSH_VALUE_OPTS = {'--repo', '-o', '--push-option', '--receive-pack', '--exec'}
 # `git push` flags that push more than the current branch.
@@ -252,6 +278,58 @@ def tokenize(cmd):
     return split_newline_separators(list(lex))
 
 
+def extract_command_substitutions(token):
+    """Return the list of inner command strings for every command substitution
+    (`$(…)` or `` `…` ``) in a token, or None if the token carries a
+    substitution construct that can't be cleanly extracted (an unbalanced `$(`
+    or backtick). Scans the whole token, so multiple and trailing-text forms
+    (`$(pwd)/sub`, `` `a` `b` ``) are all found; a nested `$(…)` is returned as
+    part of its enclosing inner string for the caller to reject. Fails safe:
+    an unbalanced construct returns None so the caller blocks."""
+    subs = []
+    i, n = 0, len(token)
+    while i < n:
+        c = token[i]
+        if c == '`':
+            j = token.find('`', i + 1)
+            if j == -1:
+                return None                    # unbalanced backtick
+            subs.append(token[i + 1:j])
+            i = j + 1
+            continue
+        if c == '$' and i + 1 < n and token[i + 1] == '(':
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if token[j] == '(':
+                    depth += 1
+                elif token[j] == ')':
+                    depth -= 1
+                j += 1
+            if depth:
+                return None                    # unbalanced $(
+            subs.append(token[i + 2:j - 1])
+            i = j
+            continue
+        i += 1
+    return subs
+
+
+def is_pure_substitution(inner):
+    """True if the inner command of a `$(…)`/backtick substitution is a
+    recognized pure, read-only, side-effect-free one (PURE_SUBSTITUTIONS). The
+    inner must tokenize to EXACTLY a registry tuple with no separator/redirect
+    token — so an appended command (`git branch --show-current; evil`), a
+    redirect (`… > f`), or a nested substitution all fail the match and keep the
+    chain deferring. Unbalanced quotes (shlex raises) fail safe to False."""
+    try:
+        toks = tokenize(inner)
+    except ValueError:
+        return False
+    if any(t in SEPARATORS or t in REDIR for t in toks):
+        return False
+    return tuple(toks) in PURE_SUBSTITUTIONS
+
+
 def has_shell_substitution(tokens):
     """True if any raw token hides a command the classifier never inspects:
     command substitution (`` `…` `` or `$(…)`, including inside a quoted arg),
@@ -260,12 +338,22 @@ def has_shell_substitution(tokens):
     git segment's args. Must run over the RAW token stream (before redirect
     targets are stripped) so a substitution in a redirect target
     (`git diff > `evil``) is caught too. Like GIT_ESCAPE_HATCHES, this only
-    downgrades a would-be `allow` to defer — it never suppresses an `ask`."""
+    downgrades a would-be `allow` to defer — it never suppresses an `ask`.
+
+    A command substitution is the one exception that does NOT block: when every
+    substitution in a token is a recognized pure/read-only one
+    (PURE_SUBSTITUTIONS), the token is treated as substitution-free, so a common
+    idiom (`gh pr view "$(git branch --show-current)"`,
+    `git -C "$(git rev-parse --show-toplevel)" status`) stays auto-approvable.
+    Any non-registry or unparseable substitution still blocks."""
     for t in tokens:
-        if '`' in t or '$(' in t:
-            return True
         if t.startswith('<(') or t.startswith('>('):
-            return True
+            return True                        # process substitution — always blocks
+        if '`' in t or '$(' in t:
+            subs = extract_command_substitutions(t)
+            if subs is None or any(not is_pure_substitution(s) for s in subs):
+                return True
+            continue                           # every substitution is pure — safe
         if t and all(c in PUNCT_CHARS for c in t) and t not in SEPARATORS and t not in REDIR:
             return True
     return False
