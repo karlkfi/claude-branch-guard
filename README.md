@@ -230,8 +230,28 @@ To verify, ask Claude to run `git commit -m test` on a checkout sitting on `main
 — you should see a permission prompt citing the protected branch. Then ask it to
 commit on a `claude/*` or feature branch; it should run without prompting.
 
+**Keep it up to date — turn on auto-update (recommended).** Claude Code
+auto-updates official Anthropic marketplaces only; third-party ones like this
+never refresh on their own, so an install pins its version until you act. Install
+time is the moment to decide — add the marketplace with `autoUpdate` on in
+`~/.claude/settings.json` and new releases install themselves at startup:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "branch-guard": {
+      "source": { "source": "git", "url": "https://github.com/karlkfi/claude-branch-guard.git" },
+      "autoUpdate": true
+    }
+  }
+}
+```
+
+Prefer to update by hand? Leave it off and pull new versions manually — see
+[Upgrade](#upgrade).
+
 **Already installed?** New releases don't install themselves — see
-[Upgrade](#upgrade) for how to pull the latest version.
+[Upgrade](#upgrade) to enable auto-update or pull the latest version.
 
 ### Local install (development)
 
@@ -254,12 +274,39 @@ add it as a `directory` marketplace in `~/.claude/settings.json`:
 ## Upgrade
 
 branch-guard installs from a GitHub marketplace, which Claude Code tracks at the
-repository's default branch (`main`). Third-party marketplaces like this one have
-auto-update **off by default**, so unless you've turned it on the steps below are
-manual. Either way, a running session won't pick up a newer release on its own:
+repository's default branch (`main`). Claude Code auto-updates official Anthropic
+marketplaces only; third-party ones like this have auto-update **off by default**,
+so an install pins its version until you either turn auto-update on or update
+manually. Either way, a running session won't pick up a newer release on its own:
 auto-update is applied at startup and the installed version stays fixed for the
 life of the session, so even after a new version is published you stay on the
 loaded one until you update and reload.
+
+### Set-and-forget: enable auto-update (recommended)
+
+Turn on auto-update for the marketplace so new releases install at startup. Add
+this to `~/.claude/settings.json` (the same block works from the
+[Install](#install) step — it's here too so existing users can drop it in):
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "branch-guard": {
+      "source": { "source": "git", "url": "https://github.com/karlkfi/claude-branch-guard.git" },
+      "autoUpdate": true
+    }
+  }
+}
+```
+
+Claude Code then refreshes the marketplace and installs newer releases when it
+starts. A restart (or `/reload-plugins` on the CLI/IDE) is still needed for a
+freshly fetched version to become the one that runs, since the hook is registered
+at startup.
+
+### Manual update
+
+Left auto-update off? Pull new versions by hand.
 
 **Claude Code (CLI or IDE extension)** — run the slash commands:
 
@@ -278,6 +325,17 @@ reinstall picks up the new version.
 2. Click the **3-dot (⋯) menu next to the plugin name** (`branch-guard`) and
    choose **Check for updates**.
 3. If an update is offered, apply it.
+
+Desktop has no `/plugin` slash command, but the `claude` CLI shares Desktop's
+plugin state, so you can update headlessly from a terminal instead of hunting for
+the menu:
+
+```bash
+claude plugin marketplace update branch-guard
+claude plugin update branch-guard@branch-guard
+```
+
+Restart the Desktop app afterward to load the new version.
 
 **Restart Claude Code after updating** (on any surface). The `PreToolUse` hook is
 registered at startup, so the new `branch-guard.py` only becomes the one that
