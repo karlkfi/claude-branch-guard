@@ -255,7 +255,11 @@ the IDE extensions, or **Claude Code for Claude Desktop**.
 
 After installing with either method:
 
-- Requires `python3` and `git` on your PATH.
+- Requires Python 3 and `git` on your PATH. The hook is launched through
+  `hooks/run-python-hook.cmd`, which resolves an interpreter by trying `py -3`,
+  `python`, then `python3` (on Windows) or `python3`, then `python` (elsewhere),
+  so a working Python under any of those names is enough. If none of them runs,
+  the guard reports the problem on stderr rather than failing silently.
 - Restart Claude Code so the hook is registered.
 - **Won't fire where plugin `PreToolUse` hooks don't run** (e.g. surfaces that
   don't yet run plugin hooks); there the guard never fires.
