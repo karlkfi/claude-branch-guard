@@ -29,34 +29,48 @@ grep -rn '"version"' .claude-plugin/
    ./test/run.sh
    ```
 
-3. **Bump both version files** to the new `X.Y.Z`. Patch (`Z`) for fixes, docs, and packaging; minor (`Y`) for new guarded commands or hook surface; major (`X`) for a default-behavior change. Most releases are patch.
+3. **Write the release notes** to `docs/releases/vX.Y.Z.md` and land them on `main` through a normal PR — they are repo content, not a scratch file. Do this *before* the bump so the tag contains its own notes, then re-sync:
 
-4. **Commit the bump alone** — no other changes in this commit:
+   ```
+   git fetch origin main && git rebase origin/main
+   ```
+
+   A notes PR cannot list itself in its own **Everything since v<PREV>** section, so it is the one omission that section always has; account for it in the sentence saying what the list leaves out. See §Release notes for the body format.
+
+4. **Bump both version files** to the new `X.Y.Z`. Patch (`Z`) for fixes, docs, and packaging; minor (`Y`) for new guarded commands or hook surface; major (`X`) for a default-behavior change. Most releases are patch.
+
+5. **Commit the bump alone** — no other changes in this commit:
 
    ```
    git commit -am "chore(release): bump version to X.Y.Z"
    ```
 
-5. **Push the bump straight to `main`** (see §The direct-to-main exception):
+6. **Push the bump straight to `main`** (see §The direct-to-main exception):
 
    ```
    git push origin HEAD:main
    ```
 
-6. **Tag the bump commit** with an annotated tag whose message is just the version:
+7. **Tag the bump commit** with an annotated tag whose message is just the version:
 
    ```
    git tag -a vX.Y.Z -m "vX.Y.Z" <bump-commit-sha>
    git push origin vX.Y.Z
    ```
 
-7. **Create the GitHub Release** on that tag, marked latest:
+8. **Create the GitHub Release** on that tag, marked latest, from the committed notes:
 
    ```
-   gh release create vX.Y.Z --title "vX.Y.Z" --latest --notes-file notes.md
+   gh release create vX.Y.Z --title "vX.Y.Z" --latest --notes-file docs/releases/vX.Y.Z.md
    ```
 
-   See §Release notes for the body format.
+9. **Verify the published body matches the file.** Silence means they agree:
+
+   ```
+   gh release view vX.Y.Z --json body --template '{{.body}}' | diff - docs/releases/vX.Y.Z.md
+   ```
+
+   Run this again after any later change to the body. It is the only thing that catches an edit made in the browser and never committed — see [`docs/releases/README.md`](../releases/README.md).
 
 ## The direct-to-main exception
 
@@ -66,7 +80,9 @@ This is the *only* sanctioned direct-to-main push. It is narrow by design: a two
 
 ## Release notes
 
-Notes open with a one-line statement of what the plugin is, then a `> [!NOTE]` callout for any visible behavior change. After that comes a menu of sections — **use only the ones this release can fill**, in this order. `v1.4.1` is the worked example; `gh release view v1.4.1` shows the shape.
+The body lives at `docs/releases/vX.Y.Z.md` and is published from there. It carries no front matter and no `# vX.Y.Z` title heading — the Releases page renders the tag as the page h1, so a title in the body duplicates it.
+
+Notes open with a one-line statement of what the plugin is, then a `> [!NOTE]` callout for any visible behavior change. After that comes a menu of sections — **use only the ones this release can fill**, in this order. [`docs/releases/v1.4.1.md`](../releases/v1.4.1.md) is the worked example.
 
 | Section | Include when | Contents |
 |---|---|---|
@@ -85,7 +101,17 @@ To enumerate what shipped since the last tag:
 git log --oneline v<PREV>..HEAD
 ```
 
-`gh release create ... --generate-notes` produces the PR bullet list, which is the raw material for **Everything since v<PREV>** — the rest is written by hand. Publish with `--notes-file`; a body this size does not belong on a command line.
+`gh release create ... --generate-notes` produces the PR bullet list, which is the raw material for **Everything since v<PREV>** — the rest is written by hand.
+
+### Amending a published body
+
+The file tracks what the Release **currently says**, not what it said at tag time, so a later correction changes both. Edit `docs/releases/vX.Y.Z.md`, commit it, and re-publish:
+
+```
+gh release edit vX.Y.Z --notes-file docs/releases/vX.Y.Z.md
+```
+
+Never edit the body in the browser. That changes one copy of a two-copy artifact and leaves nothing to compare against — which is the whole reason the notes moved into the repo. Re-run the step 9 diff afterwards.
 
 ## The first release
 
@@ -102,3 +128,4 @@ There is no prior tag yet, so a couple of steps adapt:
 - **Bundling code or docs into the bump commit.** That turns the sanctioned direct-to-main push into an unsanctioned one. Land everything else first, then bump.
 - **Tagging before pushing the bump.** Push `main` first, then tag the commit that's now on `main`, so the tag is never orphaned on a branch.
 - **Skipping the GitHub Release.** A tag without a Release breaks the "Full Changelog" chain and the Latest marker; every tag should have a matching Release.
+- **Editing the body in the browser, or publishing from a file outside the repo.** Either one produces a published body with no committed counterpart, so nothing can be diffed against it and the divergence is silent. Notes come from `docs/releases/vX.Y.Z.md`; step 9 is what proves they still agree.
