@@ -20,9 +20,18 @@ HOOK_SCRIPT="branch-guard.py"
 
 # Mode is load-bearing on macOS/Linux: hooks.json execs the launcher directly,
 # so a checkout that dropped the bit fails every invocation with exit 126.
-if [[ ! -x "$LAUNCHER" ]]; then
-  printf '%s is not executable — git mode must be 100755\n' "$LAUNCHER" >&2
-  exit 1
+# Assert the mode *git records*, not the filesystem bit — that is the thing a
+# fresh clone inherits, and it is checkable from any platform. `test -x` is not:
+# Windows checks out under core.filemode=false and does not mark a .cmd
+# executable, so it reports a problem that does not exist where mode matters.
+if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  launcher_mode="$(git -C "$REPO_ROOT" ls-files -s -- hooks/run-python-hook.cmd \
+    | cut -d' ' -f1)"
+  if [[ "$launcher_mode" != 100755 ]]; then
+    printf 'hooks/run-python-hook.cmd is mode %s in git, must be 100755\n' \
+      "${launcher_mode:-unset}" >&2
+    exit 1
+  fi
 fi
 
 # Claude Code hands the hook native paths, so the fixtures must too. Under Git
