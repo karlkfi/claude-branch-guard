@@ -73,6 +73,8 @@ It spins up a throwaway git repo under `tmp/` and asserts the emitted `permissio
 
 When changing the classifier (`classify_git`/`classify_gh`, the allowlist sets), the push logic, or `PROTECTED_BRANCH_RE`, add the case that motivated the change as a fixture, and hand-exercise the behavior table in `README.md` against the change before committing. New SPEC-style rules are easy to get subtly wrong — actually run `./test/run.sh`.
 
+CI runs the suite on the Linux Python matrix and once on `windows-latest` under Git Bash (`.github/workflows/tests.yml`). Windows is where path handling diverges — `ntpath` reads a leading slash as drive-relative, so an MSYS-shaped path (`/d/a/repo/…`) resolves onto the hook process's drive and `git -C` misses, turning a protected-branch `ask` into no decision at all. Two harness rules keep the fixtures honest there, and a new fixture that names a path must follow both: build the payload with `edit_payload`/`bash_payload` so `jq` json-encodes the path (a raw `printf` would let a backslash read as a JSON escape), and pass the path through `nat` (`cygpath -w` on Windows, identity elsewhere) so the hook sees the native form Claude Code actually sends. A native path interpolated into a *command* string is also single-quoted, because `shlex` eats an unquoted backslash exactly as bash does. The harness picks its interpreter by executing candidates (`python3`, `python`, `py -3`) rather than hardcoding `python3`, which on Windows is usually the Microsoft Store alias stub — present on PATH, exits 9009 when run.
+
 ## Commits
 
 - Commit after each task is complete and validated.

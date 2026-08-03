@@ -604,7 +604,9 @@ decision for each command/branch combination):
 ./test/run.sh
 ```
 
-It needs `python3` and `git`, plus `jq` to read the hook's JSON output.
+It needs Python 3 and `git`, plus `jq` to read the hook's JSON output. On
+Windows, run it from Git Bash — that is the shell Claude Code's Bash tool uses
+there, and it is how CI runs the suite on `windows-latest`.
 
 ## License
 

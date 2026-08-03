@@ -2,12 +2,50 @@
 #
 # Pipe-tests for hooks/branch-guard.py. Spins up a throwaway git repo under
 # tmp/, exercises each tool/branch combination, and asserts the emitted
-# permissionDecision. Requires python3, jq, and git on PATH.
+# permissionDecision. Requires Python 3, jq, and git on PATH; on Windows it
+# runs under Git Bash, which is the shell Claude Code's Bash tool uses there.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 HOOK="$REPO_ROOT/hooks/branch-guard.py"
+
+# Probe an interpreter by EXECUTING it, not by testing for its presence — the
+# same discipline hooks/run-python-hook.cmd uses. On Windows the `python3` on
+# PATH is usually the Microsoft Store alias stub: `command -v` finds it, and
+# running it exits 9009 with "Python was not found".
+PY=""
+for candidate in python3 python "py -3"; do
+  if $candidate -c 'import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)' \
+      >/dev/null 2>&1; then
+    PY="$candidate"
+    break
+  fi
+done
+if [[ -z "$PY" ]]; then
+  printf 'no working Python 3 interpreter (tried python3, python, py -3)\n' >&2
+  exit 1
+fi
+
+# Claude Code hands the hook native paths, so the fixtures must too. Under Git
+# Bash a path is `/d/a/repo/…`, which a native Python reads through ntpath —
+# where a leading slash is drive-relative, so the path lands on the hook
+# process's drive and the repo lookup silently misses. `cygpath -w` is a no-op
+# off Windows because the case never matches an MSYS-only prefix there.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) NATIVE_PATHS=yes ;;
+  *)                    NATIVE_PATHS=no  ;;
+esac
+
+# nat PATH -> PATH in the platform's native form (identity off Windows, and for
+# a relative path, which needs no conversion on either).
+nat() {
+  if [[ "$NATIVE_PATHS" == yes && "$1" == /* ]]; then
+    cygpath -w "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
 
 # Each run gets its own throwaway repo under tmp/ so concurrent or back-to-back
 # invocations never share (and clobber) a working dir. The EXIT trap removes
@@ -42,7 +80,7 @@ setup_repo() {
 # ENV_KV is an optional `NAME=value` passed into the hook's environment.
 decision_for() {
   local payload="$1" cwd="$2" env_kv="${3:-}" out
-  out="$( cd "$cwd" && printf '%s' "$payload" | env ${env_kv} python3 "$HOOK" )"
+  out="$( cd "$cwd" && printf '%s' "$payload" | env ${env_kv} $PY "$HOOK" )"
   if [[ -z "$out" ]]; then
     printf 'none'
   else
@@ -53,7 +91,7 @@ decision_for() {
 # reason_for PAYLOAD CWD [ENV_KV] -> echoes the permissionDecisionReason, or "".
 reason_for() {
   local payload="$1" cwd="$2" env_kv="${3:-}" out
-  out="$( cd "$cwd" && printf '%s' "$payload" | env ${env_kv} python3 "$HOOK" )"
+  out="$( cd "$cwd" && printf '%s' "$payload" | env ${env_kv} $PY "$HOOK" )"
   if [[ -n "$out" ]]; then
     printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason'
   fi
@@ -81,6 +119,23 @@ check_text() {
     printf 'FAIL - %s: expected reason to %s %q, got: %s\n' "$name" "$mode" "$needle" "$text"
     fail=$((fail + 1))
   fi
+}
+
+# edit_payload TOOL KEY PATH [CWD] [MODE] -> an edit-tool payload as JSON. PATH
+# and CWD arrive in native form and jq json-encodes them, so a Windows path's
+# backslashes survive the trip instead of reading as JSON escapes.
+edit_payload() {
+  jq -nc --arg tool "$1" --arg key "$2" --arg path "$(nat "$3")" \
+         --arg cwd "$(nat "${4:-}")" --arg mode "${5:-}" '
+    {tool_name: $tool, tool_input: {($key): $path}}
+    + (if $cwd == "" then {} else {cwd: $cwd} end)
+    + (if $mode == "" then {} else {permission_mode: $mode} end)'
+}
+
+# bash_payload COMMAND -> a Bash payload with COMMAND json-encoded (it may
+# contain newlines, quotes, or a native path).
+bash_payload() {
+  jq -nc --arg cmd "$1" '{tool_name: "Bash", tool_input: {command: $cmd}}'
 }
 
 setup_repo
@@ -118,8 +173,11 @@ check "commit && rm on main -> ask" ask \
   "$(decision_for '{"tool_name":"Bash","tool_input":{"command":"git commit -m x && rm -rf foo"}}' "$WORK")"
 
 # 3e. env-prefixed / global-flag commit still detected on main -> ask
+#     The path is single-quoted because that is how a real command names a
+#     native Windows path: the hook lexes with shlex, which eats an unquoted
+#     backslash exactly as bash does. A no-op on a POSIX path.
 check "env-prefixed commit on main -> ask" ask \
-  "$(decision_for "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"GIT_AUTHOR_NAME=x git -C $WORK commit -m y\"}}" "$WORK")"
+  "$(decision_for "$(bash_payload "GIT_AUTHOR_NAME=x git -C '$(nat "$WORK")' commit -m y")" "$WORK")"
 
 # 3f. `git log` is read-only (the `commit` substring is not a commit invocation).
 check "git log --grep=commit -> allow" allow \
@@ -128,21 +186,21 @@ check "git log --grep=commit -> allow" allow \
 # 4. edit of a file whose repo is on main -> ask
 git -C "$WORK" checkout -q main
 check "edit on main -> ask" ask \
-  "$(decision_for "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$WORK/file.txt\"}}" "$REPO_ROOT")"
+  "$(decision_for "$(edit_payload Edit file_path "$WORK/file.txt")" "$REPO_ROOT")"
 
 # 5. edit of a file whose repo is on a non-protected branch -> no decision
 git -C "$WORK" checkout -q claude/x
 check "write on claude/x -> none" none \
-  "$(decision_for "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$WORK/file.txt\"}}" "$REPO_ROOT")"
+  "$(decision_for "$(edit_payload Write file_path "$WORK/file.txt")" "$REPO_ROOT")"
 
 # 5b. NotebookEdit (path comes in as `notebook_path`) is guarded like the other
 #     edit tools: ask on main, defer on a feature branch.
 git -C "$WORK" checkout -q main
 check "notebook edit on main -> ask" ask \
-  "$(decision_for "{\"tool_name\":\"NotebookEdit\",\"tool_input\":{\"notebook_path\":\"$WORK/file.txt\"}}" "$REPO_ROOT")"
+  "$(decision_for "$(edit_payload NotebookEdit notebook_path "$WORK/file.txt")" "$REPO_ROOT")"
 git -C "$WORK" checkout -q claude/x
 check "notebook edit on claude/x -> none" none \
-  "$(decision_for "{\"tool_name\":\"NotebookEdit\",\"tool_input\":{\"notebook_path\":\"$WORK/file.txt\"}}" "$REPO_ROOT")"
+  "$(decision_for "$(edit_payload NotebookEdit notebook_path "$WORK/file.txt")" "$REPO_ROOT")"
 
 # 5c. Nested worktree: a RELATIVE file_path resolves against the payload `cwd`
 #     (the session's worktree), not the hook process's own cwd. Here the process
@@ -152,10 +210,10 @@ git -C "$WORK" checkout -q main
 WT="$WORK/.claude/worktrees/wt"
 git -C "$WORK" worktree add -q "$WT" claude/x
 check "edit rel path honors payload cwd (worktree on claude/x) -> none" none \
-  "$(decision_for "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"file.txt\"},\"cwd\":\"$WT\"}" "$WORK")"
+  "$(decision_for "$(edit_payload Edit file_path file.txt "$WT")" "$WORK")"
 # And the converse still catches main when the payload cwd is the main checkout.
 check "edit rel path honors payload cwd (main checkout) -> ask" ask \
-  "$(decision_for "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"file.txt\"},\"cwd\":\"$WORK\"}" "$REPO_ROOT")"
+  "$(decision_for "$(edit_payload Edit file_path file.txt "$WORK")" "$REPO_ROOT")"
 git -C "$WORK" worktree remove -f "$WT"
 git -C "$WORK" checkout -q claude/x
 
@@ -293,9 +351,9 @@ git -C "$WORK" checkout -q main
 check_text "[auto] commit-on-main deny is not confirm-shaped" lacks "confirm before proceeding" \
   "$(reason_for "$(push_mode 'git commit -m x' 'auto')" "$WORK")"
 check_text "[auto] edit-on-main deny is not confirm-shaped" lacks "confirm before proceeding" \
-  "$(reason_for "$(printf '{"tool_name":"Edit","tool_input":{"file_path":"%s/file.txt"},"permission_mode":"auto"}' "$WORK")" "$WORK")"
+  "$(reason_for "$(edit_payload Edit file_path "$WORK/file.txt" "" auto)" "$WORK")"
 check_text "[default] edit-on-main ask invites confirmation" has "— confirm before proceeding." \
-  "$(reason_for "$(printf '{"tool_name":"Edit","tool_input":{"file_path":"%s/file.txt"},"permission_mode":"default"}' "$WORK")" "$WORK")"
+  "$(reason_for "$(edit_payload Edit file_path "$WORK/file.txt" "" default)" "$WORK")"
 git -C "$WORK" checkout -q claude/x
 
 # 11b. detached HEAD resolves to no branch, so the hook defers (even though the
@@ -665,45 +723,42 @@ check "git reset --hard ; echo done -> ask" ask \
 #     is dropped before lexing, so an all-git chain wrapping a heredoc stays
 #     auto-approved instead of deferring on the body's foreign-looking lines.
 #     The operator line and anything after the terminator still classify.
-# hbash CMD -> a Bash payload with CMD json-encoded (CMD may contain newlines).
-hbash() { python3 -c 'import json,sys; print(json.dumps({"tool_name":"Bash","tool_input":{"command":sys.argv[1]}}))' "$1"; }
-
 git -C "$WORK" checkout -q claude/x
 # A quoted-delimiter body whose lines look like foreign segments (&&/;/rm) is
 # inert data -> the commit auto-approves.
 check "commit + quoted heredoc (foreign-looking body) -> allow" allow \
-  "$(decision_for "$(hbash "$(printf 'git commit -F- <<'"'"'EOF'"'"'\nfeat: x\n\n- a && b ; rm -rf /\nEOF')")" "$WORK")"
+  "$(decision_for "$(bash_payload "$(printf 'git commit -F- <<'"'"'EOF'"'"'\nfeat: x\n\n- a && b ; rm -rf /\nEOF')")" "$WORK")"
 # An unquoted delimiter with a plain body (no expansion vectors) also strips.
 check "commit + unquoted heredoc (plain body) -> allow" allow \
-  "$(decision_for "$(hbash "$(printf 'git commit -F- <<EOF\nfeat: x\nEOF')")" "$WORK")"
+  "$(decision_for "$(bash_payload "$(printf 'git commit -F- <<EOF\nfeat: x\nEOF')")" "$WORK")"
 # A <<- heredoc with a tab-indented terminator strips too.
 check "commit + <<- heredoc (indented terminator) -> allow" allow \
-  "$(decision_for "$(hbash "$(printf 'git commit -F- <<-'"'"'EOF'"'"'\n\tbody\n\tEOF')")" "$WORK")"
+  "$(decision_for "$(bash_payload "$(printf 'git commit -F- <<-'"'"'EOF'"'"'\n\tbody\n\tEOF')")" "$WORK")"
 # A command after the terminator still classifies: a push to main asks.
 check "heredoc body then push origin main -> ask" ask \
-  "$(decision_for "$(hbash "$(printf 'git commit -F- <<'"'"'EOF'"'"'\nmsg\nEOF\ngit push origin main')")" "$WORK")"
+  "$(decision_for "$(bash_payload "$(printf 'git commit -F- <<'"'"'EOF'"'"'\nmsg\nEOF\ngit push origin main')")" "$WORK")"
 # A real trailing command after the terminator can't ride along -> defer.
 check "heredoc body then rm -> none" none \
-  "$(decision_for "$(hbash "$(printf 'git commit -F- <<'"'"'EOF'"'"'\nmsg\nEOF\nrm -rf foo')")" "$WORK")"
+  "$(decision_for "$(bash_payload "$(printf 'git commit -F- <<'"'"'EOF'"'"'\nmsg\nEOF\nrm -rf foo')")" "$WORK")"
 # SECURITY: an UNQUOTED body with a command substitution the shell would run is
 # NOT stripped (left in the stream) -> the substitution guard defers.
 check "unquoted heredoc body with substitution -> none (defer)" none \
-  "$(decision_for "$(hbash "$(printf 'git commit -F- <<EOF\n$(touch PWNED)\nEOF')")" "$WORK")"
+  "$(decision_for "$(bash_payload "$(printf 'git commit -F- <<EOF\n$(touch PWNED)\nEOF')")" "$WORK")"
 # A QUOTED delimiter suppresses expansion, so the same body is inert -> allow.
 check "quoted heredoc body with substitution (inert) -> allow" allow \
-  "$(decision_for "$(hbash "$(printf 'git commit -F- <<'"'"'EOF'"'"'\n$(touch PWNED)\nEOF')")" "$WORK")"
+  "$(decision_for "$(bash_payload "$(printf 'git commit -F- <<'"'"'EOF'"'"'\n$(touch PWNED)\nEOF')")" "$WORK")"
 # A heredoc feeding a NON-git command (body full of git-looking text) has no
 # git/gh segment once stripped -> defer (no false-positive prompt).
 check "cat heredoc with git-looking body -> none (defer)" none \
-  "$(decision_for "$(hbash "$(printf 'cat <<'"'"'EOF'"'"'\ngit push origin main\nEOF')")" "$WORK")"
+  "$(decision_for "$(bash_payload "$(printf 'cat <<'"'"'EOF'"'"'\ngit push origin main\nEOF')")" "$WORK")"
 # An unterminated heredoc is left unchanged (fail safe): the body lexes and the
 # chain defers rather than silently allowing.
 check "unterminated heredoc -> none (defer)" none \
-  "$(decision_for "$(hbash "$(printf 'git commit -F- <<EOF\nbody with no terminator line')")" "$WORK")"
+  "$(decision_for "$(bash_payload "$(printf 'git commit -F- <<EOF\nbody with no terminator line')")" "$WORK")"
 # A commit wrapping a heredoc on main still asks (protected branch).
 git -C "$WORK" checkout -q main
 check "commit + heredoc on main -> ask" ask \
-  "$(decision_for "$(hbash "$(printf 'git commit -F- <<'"'"'EOF'"'"'\nmsg\nEOF')")" "$WORK")"
+  "$(decision_for "$(bash_payload "$(printf 'git commit -F- <<'"'"'EOF'"'"'\nmsg\nEOF')")" "$WORK")"
 git -C "$WORK" checkout -q claude/x
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

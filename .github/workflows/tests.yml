@@ -19,3 +19,19 @@ jobs:
           python-version: ${{ matrix.python-version }}
       # git and jq are preinstalled on ubuntu-latest; the harness uses both.
       - run: bash test/run.sh
+
+  # Windows resolves paths through ntpath, where a leading slash is
+  # drive-relative — so a POSIX-shaped path lands on the hook process's drive
+  # and the repo lookup misses, silently downgrading a protected-branch `ask`
+  # to no decision at all. Nothing in the Linux matrix can catch that. The
+  # suite runs under Git Bash, the shell Claude Code's Bash tool uses there.
+  run-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # git and jq are preinstalled on windows-latest; the harness uses both.
+      - run: bash test/run.sh
+        shell: bash

@@ -1,0 +1,4 @@
+# The test harness and the hook are read by bash and by Python on every
+# platform, including Windows, where the suite runs under Git Bash. A CRLF
+# checkout breaks bash outright, so the working tree stays LF-only everywhere.
+* text=auto eol=lf
