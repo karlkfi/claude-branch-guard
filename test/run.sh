@@ -155,7 +155,18 @@ launcher_err="$(printf '' | "$LAUNCHER" definitely-not-a-real-script.py 2>&1)" \
   && launcher_rc=0 || launcher_rc=$?
 check "launcher rejects a missing script -> exit 1" 1 "$launcher_rc"
 check_text "launcher says why it failed" has "script not found" "$launcher_err"
-printf 'PROBE launcher_err=%s\n' "$launcher_err" >&2
+
+#    Which half of the polyglot answered is itself a coverage claim, so pin it.
+#    Git Bash hands a .cmd to the Windows command processor, so the batch branch
+#    runs there (`%~dp0`, backslashes) and the POSIX tail runs everywhere else
+#    (`pwd`, forward slashes) — which is the only reason CI covers both. If that
+#    ever flips, the cmd.exe half loses its sole coverage without a single
+#    fixture going red, so catch it here instead.
+if [[ "$NATIVE_PATHS" == yes ]]; then
+  check_text "launcher answers from its cmd.exe half" has '\hooks\' "$launcher_err"
+else
+  check_text "launcher answers from its POSIX half" has '/hooks/' "$launcher_err"
+fi
 
 # 1. git commit on a non-protected branch -> allow
 git -C "$WORK" checkout -q claude/x
