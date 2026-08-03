@@ -85,6 +85,7 @@ the default `strict` [push policy](#push-guard).
 | editing a file whose repo is on `main` *(Edit/Write/MultiEdit/NotebookEdit)* | **ask** |
 | `git push origin main` / `git push origin HEAD:main` | **ask** |
 | `git push origin other-branch` *(strict policy)* | **ask** |
+| `git push origin v1.3.0` / `git push origin refs/tags/v1.3.0` / `git push --tags` *(publishes a tag, strict policy)* | **ask** |
 | `git reset --hard HEAD~1` | **ask** |
 | `git clean -fd` | **ask** |
 | `git branch -D old` | **ask** |
@@ -222,13 +223,22 @@ variable:
 
 | Policy | Behavior |
 | --- | --- |
-| `strict` *(default)* | **allow** a push of the worktree's own current branch, including a force push of it. **ask** before any other push — a *different* branch (`git push origin other`), foreign refspecs (`git push origin HEAD:other`), wildcards, `--all`/`--mirror`, or a protected target. |
+| `strict` *(default)* | **allow** a push of the worktree's own current branch, including a force push of it. **ask** before any other push — a *different* branch (`git push origin other`), foreign refspecs (`git push origin HEAD:other`), wildcards, `--all`/`--mirror`, a tag (`git push origin v1.3.0`, `refs/tags/v1.3.0`, `--tags`), or a protected target. |
 | `protected` | **ask** before a push whose target is `main`/`master` (including `git push origin main`, `HEAD:main`, deleting `main`, and `--all`/`--mirror`). Any other push defers. Never auto-approves. |
 | `off` | Pushes are not guarded at all. |
 
 A bare `git push` / `git push origin` pushes the current branch to its same-named
 upstream: under `strict` it is auto-approved (it's the worktree branch); under
 `protected` it defers.
+
+**Tags.** Publishing a tag isn't a push of the worktree branch, so under `strict`
+it asks — whichever way it's spelled (`git push origin v1.3.0`,
+`git push origin refs/tags/v1.3.0`, `git push --tags`). Cutting a release is
+usually the one step worth a human keystroke. One gap is deliberate:
+`git push --follow-tags` stays auto-approved, since it publishes only annotated
+tags already reachable from the branch being pushed, and `push.followTags` can
+turn on the same behavior from config where the hook can't see it. Under
+`protected`, tag pushes defer as before — that policy only guards `main`/`master`.
 
 The push guard is **best-effort**: it parses the Bash command Claude runs (so it
 only governs Claude's `Bash` tool), and unusual refspecs may not be classified —

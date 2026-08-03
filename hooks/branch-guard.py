@@ -240,12 +240,20 @@ PURE_SUBSTITUTIONS = frozenset({
 PUSH_VALUE_OPTS = {'--repo', '-o', '--push-option', '--receive-pack', '--exec'}
 # `git push` flags that push more than the current branch.
 PUSH_MANY_FLAGS = {'--all', '--mirror', '--branches'}
+# `git push` flags that publish tags alongside (or instead of) a branch. `--tags`
+# pushes every local tag, including release tags unrelated to the worktree
+# branch, so under `strict` it asks like any other non-branch push.
+# `--follow-tags` is deliberately absent: it pushes only annotated tags reachable
+# from the branch already being pushed, and `push.followTags` can enable the same
+# behavior from config where the hook can't see it — see README "Limitations".
+PUSH_TAG_FLAGS = {'--tags'}
 
 # Push-guard policy (env var BRANCH_GUARD_PUSH_POLICY):
 #   strict (default) — auto-approve a push of the worktree's own current branch
 #                      (including force pushes); ask before any other push
 #                      (other branches, foreign refspecs like HEAD:main,
-#                      wildcards, --all/--mirror, or a protected target).
+#                      wildcards, --all/--mirror, tags via --tags or an explicit
+#                      refs/tags/… refspec, or a protected target).
 #   protected        — ask before a push whose target is main/master; otherwise
 #                      defer. Never auto-approves a push.
 #   off              — don't guard pushes at all.
@@ -659,36 +667,44 @@ def is_benign_segment(tokens):
 
 
 def ref_to_branch(ref, current):
-    """Map one side of a push refspec to (branch_name_or_None, is_wildcard).
-    `HEAD` -> current branch; `refs/heads/x` -> `x`; an empty side (deletion
-    source) or a non-branch ref (`refs/tags/...`) -> None; a `*` glob sets the
-    wildcard flag. A bare name is assumed to be a branch (best-effort: it could
-    be a tag, but that only ever errs toward asking, never toward allowing)."""
+    """Map one side of a push refspec to (branch_name_or_None, is_wildcard,
+    non_branch_ref_or_None). `HEAD` -> current branch; `refs/heads/x` -> `x`; an
+    empty side (a deletion's source) -> all None; a `*` glob sets the wildcard
+    flag. A bare name is assumed to be a branch (best-effort: it could be a tag,
+    but that only ever errs toward asking, never toward allowing).
+
+    A fully-qualified ref that ISN'T a branch (`refs/tags/v1`, `refs/notes/…`)
+    comes back as the third element rather than as a plain None. It names a real
+    ref the push would publish, so the caller has to object to it — read as
+    "no branch here" it would sail past every branch check into the strict
+    auto-approve, which is how `git push origin refs/tags/v1.3.0` used to be
+    allowed while the equivalent `git push origin v1.3.0` asked."""
     if ref == '':
-        return (None, False)
+        return (None, False, None)
     if '*' in ref:
-        return (None, True)
+        return (None, True, None)
     if ref == 'HEAD':
-        return (current, False)
+        return (current, False, None)
     if ref.startswith('refs/heads/'):
-        return (ref[len('refs/heads/'):], False)
+        return (ref[len('refs/heads/'):], False, None)
     if ref.startswith('refs/'):
-        return (None, False)
-    return (ref, False)
+        return (None, False, ref)
+    return (ref, False, None)
 
 
 def parse_refspec(spec, current, delete):
-    """Resolve a refspec to (src_branch, dst_branch, is_wildcard). With
-    `--delete`, the token is a destination ref to remove (src is None)."""
+    """Resolve a refspec to (src_branch, dst_branch, is_wildcard,
+    non_branch_ref). With `--delete`, the token is a destination ref to remove
+    (src is None)."""
     if delete:
-        dst_b, glob = ref_to_branch(spec, current)
-        return (None, dst_b, glob)
+        dst_b, glob, other = ref_to_branch(spec, current)
+        return (None, dst_b, glob, other)
     if spec.startswith('+'):
         spec = spec[1:]
     src_raw, dst_raw = spec.split(':', 1) if ':' in spec else (spec, spec)
-    src_b, src_glob = ref_to_branch(src_raw, current)
-    dst_b, dst_glob = ref_to_branch(dst_raw, current)
-    return (src_b, dst_b, src_glob or dst_glob)
+    src_b, src_glob, src_other = ref_to_branch(src_raw, current)
+    dst_b, dst_glob, dst_other = ref_to_branch(dst_raw, current)
+    return (src_b, dst_b, src_glob or dst_glob, dst_other or src_other)
 
 
 def push_decision(args, current, policy):
@@ -697,7 +713,7 @@ def push_decision(args, current, policy):
     (defer). strict auto-approves a push of the worktree branch (incl. force);
     protected only asks on a protected target. Leans toward asking (strict) /
     deferring (protected) on parsing uncertainty, never toward allowing."""
-    positionals, many, delete, i = [], False, False, 0
+    positionals, many, tags, delete, i = [], False, False, False, 0
     while i < len(args):
         t = args[i]
         if t == '--':
@@ -706,6 +722,8 @@ def push_decision(args, current, policy):
         if t.startswith('-'):
             if t in PUSH_MANY_FLAGS:
                 many = True
+            if t in PUSH_TAG_FLAGS:
+                tags = True
             if t in ('--delete', '-d'):
                 delete = True
             i += 2 if t in PUSH_VALUE_OPTS else 1
@@ -715,6 +733,9 @@ def push_decision(args, current, policy):
 
     if many:
         return ('ask', "Push targets multiple branches (--all/--mirror)")
+    if tags and policy == 'strict':
+        return ('ask', "Push publishes every local tag (--tags), not just the "
+                       f"worktree branch '{current}'")
 
     # positionals[0] is the repository; the rest are refspecs. With no refspec,
     # git pushes the current branch to its same-named upstream. Force flags
@@ -722,14 +743,17 @@ def push_decision(args, current, policy):
     # so a force push of the worktree branch is treated like any other.
     refspecs = positionals[1:] if positionals else []
     pairs = ([parse_refspec(s, current, delete) for s in refspecs]
-             if refspecs else [(current, current, False)])
+             if refspecs else [(current, current, False, None)])
 
-    for src_b, dst_b, glob in pairs:
+    for src_b, dst_b, glob, other in pairs:
         if glob:
             return ('ask', "Push uses a wildcard refspec (multiple branches)")
         if dst_b and is_protected(dst_b):
             return ('ask', f"Push targets protected branch '{dst_b}'")
         if policy == 'strict':
+            if other is not None:
+                return ('ask', f"Push targets '{other}', a tag or other non-branch ref "
+                               f"rather than the worktree branch '{current}'")
             if dst_b is not None and dst_b != current:
                 return ('ask', f"Push targets '{dst_b}', not the worktree branch '{current}'")
             if src_b is not None and src_b != current:

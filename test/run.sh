@@ -205,6 +205,32 @@ check "[default=strict] push --all -> ask" ask \
 check "[default=strict] push && rm (worktree) -> none" none \
   "$(decision_for "$(push 'git push && rm -rf foo')" "$WORK")"
 
+# 7a. Publishing a tag is not a push of the worktree branch, however it's
+#     spelled. A bare name already asked; a fully-qualified ref used to sail
+#     past every branch check into the auto-approve, because a non-`refs/heads/`
+#     ref read as "no branch involved".
+check "[default=strict] push origin v1.3.0 (bare tag name) -> ask" ask \
+  "$(decision_for "$(push 'git push origin v1.3.0')" "$WORK")"
+check "[default=strict] push origin refs/tags/v1.3.0 -> ask" ask \
+  "$(decision_for "$(push 'git push origin refs/tags/v1.3.0')" "$WORK")"
+check "[default=strict] push --tags -> ask" ask \
+  "$(decision_for "$(push 'git push --tags')" "$WORK")"
+check "[default=strict] push --tags origin -> ask" ask \
+  "$(decision_for "$(push 'git push --tags origin')" "$WORK")"
+check "[default=strict] delete a tag ref -> ask" ask \
+  "$(decision_for "$(push 'git push origin --delete refs/tags/v1.3.0')" "$WORK")"
+check_text "[default=strict] tag-ref reason names it a non-branch ref" has \
+  "a tag or other non-branch ref" \
+  "$(reason_for "$(push 'git push origin refs/tags/v1.3.0')" "$WORK")"
+# A fully-qualified BRANCH ref is still the worktree branch -> unchanged.
+check "[default=strict] push origin refs/heads/claude/x -> allow" allow \
+  "$(decision_for "$(push 'git push origin refs/heads/claude/x')" "$WORK")"
+# --follow-tags pushes only tags reachable from the branch already being pushed,
+# and push.followTags does the same from config where the hook can't see it, so
+# it stays auto-approved. Pinned so the gap is a decision, not a drift.
+check "[default=strict] push --follow-tags -> allow" allow \
+  "$(decision_for "$(push 'git push --follow-tags')" "$WORK")"
+
 # 8. protected policy: ask only on a protected target; never auto-approve.
 check "[protected] push origin main -> ask" ask \
   "$(decision_for "$(push 'git push origin main')" "$WORK" "$PROT")"
@@ -216,6 +242,12 @@ check "[protected] worktree-branch push -> none" none \
   "$(decision_for "$(push 'git push origin HEAD')" "$WORK" "$PROT")"
 check "[protected] push other feature branch -> none" none \
   "$(decision_for "$(push 'git push origin feature-y')" "$WORK" "$PROT")"
+# protected only guards main/master, so a tag push defers there as before —
+# the strict-only tag rule must not leak into it.
+check "[protected] push origin refs/tags/v1.3.0 -> none" none \
+  "$(decision_for "$(push 'git push origin refs/tags/v1.3.0')" "$WORK" "$PROT")"
+check "[protected] push --tags -> none" none \
+  "$(decision_for "$(push 'git push --tags')" "$WORK" "$PROT")"
 
 # 9. off policy: pushes are not guarded.
 check "[off] push origin main -> none" none \
