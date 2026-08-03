@@ -612,6 +612,12 @@ It needs Python 3 and `git`, plus `jq` to read the hook's JSON output. On
 Windows, run it from Git Bash — that is the shell Claude Code's Bash tool uses
 there, and it is how CI runs the suite on `windows-latest`.
 
+Each case invokes the hook the same way Claude Code does, through
+`hooks/run-python-hook.cmd`, so the launcher is exercised by the whole suite
+rather than only in real use. Git Bash routes a `.cmd` through the Windows
+command processor, so the `windows-latest` job covers the batch half of the
+launcher and the Linux jobs cover the POSIX half.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

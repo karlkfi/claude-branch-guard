@@ -1,29 +1,27 @@
 #!/usr/bin/env bash
 #
-# Pipe-tests for hooks/branch-guard.py. Spins up a throwaway git repo under
-# tmp/, exercises each tool/branch combination, and asserts the emitted
+# Pipe-tests for hooks/branch-guard.py, driven through hooks/run-python-hook.cmd
+# the way hooks/hooks.json drives it. Spins up a throwaway git repo under tmp/,
+# exercises each tool/branch combination, and asserts the emitted
 # permissionDecision. Requires Python 3, jq, and git on PATH; on Windows it
 # runs under Git Bash, which is the shell Claude Code's Bash tool uses there.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-HOOK="$REPO_ROOT/hooks/branch-guard.py"
+# Every fixture goes through the launcher, named exactly as hooks/hooks.json
+# names it, so the suite covers the path Claude Code actually takes. Invoking
+# the .py directly leaves the launcher untested — and because Claude Code
+# treats a failed PreToolUse hook as non-blocking, a broken launcher does not
+# surface as an error, it surfaces as a guard that quietly enforces nothing.
+# The launcher probes for a working Python 3 itself, so the harness doesn't.
+LAUNCHER="$REPO_ROOT/hooks/run-python-hook.cmd"
+HOOK_SCRIPT="branch-guard.py"
 
-# Probe an interpreter by EXECUTING it, not by testing for its presence — the
-# same discipline hooks/run-python-hook.cmd uses. On Windows the `python3` on
-# PATH is usually the Microsoft Store alias stub: `command -v` finds it, and
-# running it exits 9009 with "Python was not found".
-PY=""
-for candidate in python3 python "py -3"; do
-  if $candidate -c 'import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)' \
-      >/dev/null 2>&1; then
-    PY="$candidate"
-    break
-  fi
-done
-if [[ -z "$PY" ]]; then
-  printf 'no working Python 3 interpreter (tried python3, python, py -3)\n' >&2
+# Mode is load-bearing on macOS/Linux: hooks.json execs the launcher directly,
+# so a checkout that dropped the bit fails every invocation with exit 126.
+if [[ ! -x "$LAUNCHER" ]]; then
+  printf '%s is not executable — git mode must be 100755\n' "$LAUNCHER" >&2
   exit 1
 fi
 
@@ -80,7 +78,7 @@ setup_repo() {
 # ENV_KV is an optional `NAME=value` passed into the hook's environment.
 decision_for() {
   local payload="$1" cwd="$2" env_kv="${3:-}" out
-  out="$( cd "$cwd" && printf '%s' "$payload" | env ${env_kv} $PY "$HOOK" )"
+  out="$( cd "$cwd" && printf '%s' "$payload" | env ${env_kv} "$LAUNCHER" "$HOOK_SCRIPT" )"
   if [[ -z "$out" ]]; then
     printf 'none'
   else
@@ -91,7 +89,7 @@ decision_for() {
 # reason_for PAYLOAD CWD [ENV_KV] -> echoes the permissionDecisionReason, or "".
 reason_for() {
   local payload="$1" cwd="$2" env_kv="${3:-}" out
-  out="$( cd "$cwd" && printf '%s' "$payload" | env ${env_kv} $PY "$HOOK" )"
+  out="$( cd "$cwd" && printf '%s' "$payload" | env ${env_kv} "$LAUNCHER" "$HOOK_SCRIPT" )"
   if [[ -n "$out" ]]; then
     printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason'
   fi
