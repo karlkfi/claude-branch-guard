@@ -53,7 +53,7 @@ grep -rn '"version"' .claude-plugin/
 7. **Create the GitHub Release** on that tag, marked latest:
 
    ```
-   gh release create vX.Y.Z --title "vX.Y.Z" --latest --notes "..."
+   gh release create vX.Y.Z --title "vX.Y.Z" --latest --notes-file notes.md
    ```
 
    See §Release notes for the body format.
@@ -66,9 +66,18 @@ This is the *only* sanctioned direct-to-main push. It is narrow by design: a two
 
 ## Release notes
 
-- A one-line intro summarizing the release theme (e.g. "Patch release: a parsing hardening fix and docs improvements.").
-- A bullet per notable PR: `* <title> by @<author> in <PR-url>`. Curate — highlight user-facing changes; routine chores can be folded into the changelog link.
-- A trailing `**Full Changelog**: https://github.com/karlkfi/claude-branch-guard/compare/v<PREV>...vX.Y.Z` line.
+Notes open with a one-line statement of what the plugin is, then a `> [!NOTE]` callout for any visible behavior change. After that comes a menu of sections — **use only the ones this release can fill**, in this order. `v1.4.1` is the worked example; `gh release view v1.4.1` shows the shape.
+
+| Section | Include when | Contents |
+|---|---|---|
+| **Highlights** | Any user-facing change | A bold linked lede per change, then the *mechanism* — which function was wrong and how — not just the symptom. Link the README pinned at the release tag (`blob/vX.Y.Z/README.md#anchor`), never `main`, so an operator on an older release reads that release's docs. |
+| **Upgrading** | Always | Whether any step is required (usually none), the `claude plugin update` commands, and a **needs no action but will be visible** subsection for every default that changed. |
+| **Everything since v<PREV>** | Always | A bullet per PR: `* <title> by @<author> in <PR-url>`. Say explicitly what the list omits — "all of them shipped below" when nothing is withheld, or "build and CI work is left out" when it is. Fold long lists into `<details>`. |
+| **Decision surface** | The classifier, push policy, or `PROTECTED_BRANCH_RE` moved | A before/after table of the decisions that changed, plus the standing claim that nothing else moved ("one row added, nothing removed"). This is the section a reader checks to know whether their auto-approved commands still are. |
+| **Validation** | Always | Spec count and platforms, **verified on the release commit itself** with a link to that run — not "CI is green". Close with what the suite does *not* assert. |
+| **Security** | Always | No-advisory releases say so. Note that the hook is stdlib-only so there is nothing to bump, and keep the best-effort caveat: `bypassPermissions` ignores hook decisions, so hard guarantees need a git `pre-push` hook or server-side branch protection. |
+
+Close with a **Full changelog:** line linking `https://github.com/karlkfi/claude-branch-guard/compare/v<PREV>...vX.Y.Z`.
 
 To enumerate what shipped since the last tag:
 
@@ -76,14 +85,14 @@ To enumerate what shipped since the last tag:
 git log --oneline v<PREV>..HEAD
 ```
 
-`gh release create ... --generate-notes` produces a usable first draft in this shape; edit the intro line and prune the bullets before publishing. Once a release exists, `gh release view v<PREV>` is a good reference for the established format.
+`gh release create ... --generate-notes` produces the PR bullet list, which is the raw material for **Everything since v<PREV>** — the rest is written by hand. Publish with `--notes-file`; a body this size does not belong on a command line.
 
 ## The first release
 
 There is no prior tag yet, so a couple of steps adapt:
 
 - The `git log v<PREV>..HEAD` enumeration becomes `git log --oneline` over the whole history.
-- The **Full Changelog** line has no `v<PREV>` to compare against. Either drop it, or point it at the repo's first commit: `.../compare/<root-sha>...vX.Y.Z`. `gh release create ... --generate-notes` handles this automatically for the first release.
+- The **Full changelog** line has no `v<PREV>` to compare against. Either drop it, or point it at the repo's first commit: `.../compare/<root-sha>...vX.Y.Z`. `gh release create ... --generate-notes` handles this automatically for the first release.
 - The version is already `0.1.0` (pre-1.0). Decide deliberately whether the first release tags the current `0.1.0` as-is or bumps first; everything else in this checklist applies unchanged.
 
 ## Anti-patterns to watch for
