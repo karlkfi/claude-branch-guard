@@ -45,32 +45,38 @@ grep -rn '"version"' .claude-plugin/
    git commit -am "chore(release): bump version to X.Y.Z"
    ```
 
-6. **Push the bump straight to `main`** (see §The direct-to-main exception):
+6. **Get sign-off before anything leaves the worktree.** Everything up to here is local and cheap to redo; everything after is not. Confirm the version number and the notes with the human now. Say which release you are about to cut, what the version is, and why that digit moved.
+
+   Working with nobody to ask — a non-interactive or scheduled run — stop here. Do not pick a version and publish it on your own judgement.
+
+7. **Push the bump straight to `main`** (see §The direct-to-main exception):
 
    ```
    git push origin HEAD:main
    ```
 
-7. **Tag the bump commit** with an annotated tag whose message is just the version:
+   `main` now advertises the new version to the marketplace, and the tag does not exist yet. Keep the window between this step and the tag short.
+
+8. **Tag the bump commit** with an annotated tag whose message is just the version:
 
    ```
    git tag -a vX.Y.Z -m "vX.Y.Z" <bump-commit-sha>
    git push origin vX.Y.Z
    ```
 
-8. **Create the GitHub Release** on that tag, marked latest, from the committed notes:
+9. **Create the GitHub Release** on that tag, marked latest, from the committed notes:
 
    ```
    gh release create vX.Y.Z --title "vX.Y.Z" --latest --notes-file docs/releases/vX.Y.Z.md
    ```
 
-9. **Verify the published body matches the file.** With no arguments this checks every tag, not just the new one, so it also catches a body edited on an older release since the last run:
+10. **Verify the published body matches the file.** With no arguments this checks every tag, not just the new one, so it also catches a body edited on an older release since the last run:
 
-   ```
-   ./scripts/verify-release-notes.sh
-   ```
+    ```
+    ./scripts/verify-release-notes.sh
+    ```
 
-   Run it again after any later change to a body. It is the only thing that catches an edit made in the browser and never committed — see [`docs/releases/README.md`](../releases/README.md).
+    Run it again after any later change to a body. It is the only thing that catches an edit made in the browser and never committed — see [`docs/releases/README.md`](../releases/README.md).
 
 ## The direct-to-main exception
 
@@ -111,7 +117,7 @@ The file tracks what the Release **currently says**, not what it said at tag tim
 gh release edit vX.Y.Z --notes-file docs/releases/vX.Y.Z.md
 ```
 
-Never edit the body in the browser. That changes one copy of a two-copy artifact and leaves nothing to compare against — which is the whole reason the notes moved into the repo. Re-run the step 9 diff afterwards.
+Never edit the body in the browser. That changes one copy of a two-copy artifact and leaves nothing to compare against — which is the whole reason the notes moved into the repo. Re-run the step 10 check afterwards.
 
 ## The first release
 
@@ -127,5 +133,6 @@ There is no prior tag yet, so a couple of steps adapt:
 - **Routing the bump through a PR.** The established flow is direct-to-main; a PR adds a merge commit the tag then has to point around.
 - **Bundling code or docs into the bump commit.** That turns the sanctioned direct-to-main push into an unsanctioned one. Land everything else first, then bump.
 - **Tagging before pushing the bump.** Push `main` first, then tag the commit that's now on `main`, so the tag is never orphaned on a branch.
+- **Pushing the bump before sign-off.** The push is what makes `main` advertise the version, so asking after it means asking once the answer can no longer be "not yet". Confirm at step 6, while the bump is still a local commit.
 - **Skipping the GitHub Release.** A tag without a Release breaks the "Full Changelog" chain and the Latest marker; every tag should have a matching Release.
-- **Editing the body in the browser, or publishing from a file outside the repo.** Either one produces a published body with no committed counterpart, so nothing can be diffed against it and the divergence is silent. Notes come from `docs/releases/vX.Y.Z.md`; step 9 is what proves they still agree.
+- **Editing the body in the browser, or publishing from a file outside the repo.** Either one produces a published body with no committed counterpart, so nothing can be diffed against it and the divergence is silent. Notes come from `docs/releases/vX.Y.Z.md`; step 10 is what proves they still agree.
