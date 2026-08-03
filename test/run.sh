@@ -147,6 +147,16 @@ bash_payload() {
 
 setup_repo
 
+# 0. The launcher's own error path, which nothing else covers. A missing script
+#    must fail loudly: the harness reads silence as a legitimate defer, so a
+#    launcher that dies quietly looks exactly like a guard that chose not to
+#    act — the same silent non-enforcement the launcher exists to prevent.
+launcher_err="$(printf '' | "$LAUNCHER" definitely-not-a-real-script.py 2>&1)" \
+  && launcher_rc=0 || launcher_rc=$?
+check "launcher rejects a missing script -> exit 1" 1 "$launcher_rc"
+check_text "launcher says why it failed" has "script not found" "$launcher_err"
+printf 'PROBE launcher_err=%s\n' "$launcher_err" >&2
+
 # 1. git commit on a non-protected branch -> allow
 git -C "$WORK" checkout -q claude/x
 check "commit on claude/x -> allow" allow \
