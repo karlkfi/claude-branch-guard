@@ -193,6 +193,20 @@ non-interactive mode (`auto`, `dontAsk`, `bypassPermissions`) the same commands
 return **deny** — equally blocking, with recoverable feedback for the agent
 instead of a prompt no one can answer. See [Configuration](#configuration).
 
+The two paths share the cause and differ in what they offer, so a denial is never
+mistaken for a prompt that is waiting to be answered:
+
+```
+ask   Push targets 'v1.3.0', not the worktree branch 'claude/x'
+      — confirm before proceeding.
+
+deny  Push targets 'v1.3.0', not the worktree branch 'claude/x'
+      — branch-guard denied it: permission mode 'auto' has no way to prompt for
+      confirmation. Retrying won't help — either do it outside this session
+      (e.g. run the command in a terminal), or re-run in an interactive
+      permission mode.
+```
+
 The edit check resolves the branch of **the file's own repository**
 (`git -C <dir-of-file>`), not the session's working directory — so it catches an
 edit to a file checked out on `main` (e.g. a parent repo path) even while your
@@ -442,7 +456,9 @@ update step and restart.
    `$(git branch --show-current)`, `$(pwd)`) is exempt from that second downgrade
    — matched structurally, so only the exact read-only command qualifies.
 6. **Fail safe** in non-interactive modes: a would-be `ask` is emitted as `deny`,
-   since no human is present to answer the prompt.
+   since no human is present to answer the prompt. The reason names the mode and
+   says retrying won't help, so the agent hands off instead of re-running a
+   command that can't be approved from the session.
 
 ## Agent guidance: avoiding prompts
 
@@ -498,9 +514,11 @@ protected branch (main/master) or destructive git commands. To keep work flowing
 
 - **Non-interactive modes** — in `auto`, `dontAsk`, and `bypassPermissions` an
   `ask` is automatically emitted as `deny` so the guard fails safe when no human
-  is present. (Claude Code ignores hook decisions entirely under
-  `bypassPermissions`, so a hard guarantee there still needs a git `pre-push`
-  hook or server-side branch protection.)
+  is present. The denial says so plainly (see [Behavior](#behavior)): there is no
+  confirmation to grant in this mode, so the way through is to run the command
+  yourself or re-run the session interactively. (Claude Code ignores hook
+  decisions entirely under `bypassPermissions`, so a hard guarantee there still
+  needs a git `pre-push` hook or server-side branch protection.)
 
 ## Limitations
 

@@ -50,6 +50,15 @@ decision_for() {
   fi
 }
 
+# reason_for PAYLOAD CWD [ENV_KV] -> echoes the permissionDecisionReason, or "".
+reason_for() {
+  local payload="$1" cwd="$2" env_kv="${3:-}" out
+  out="$( cd "$cwd" && printf '%s' "$payload" | env ${env_kv} python3 "$HOOK" )"
+  if [[ -n "$out" ]]; then
+    printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason'
+  fi
+}
+
 check() {
   local name="$1" expected="$2" actual="$3"
   if [[ "$expected" == "$actual" ]]; then
@@ -57,6 +66,19 @@ check() {
     pass=$((pass + 1))
   else
     printf 'FAIL - %s: expected %s, got %s\n' "$name" "$expected" "$actual"
+    fail=$((fail + 1))
+  fi
+}
+
+# check_text NAME has|lacks NEEDLE TEXT -> assert a substring is present/absent.
+check_text() {
+  local name="$1" mode="$2" needle="$3" text="$4" found=no
+  [[ "$text" == *"$needle"* ]] && found=yes
+  if [[ ( "$mode" == has && "$found" == yes ) || ( "$mode" == lacks && "$found" == no ) ]]; then
+    printf 'ok   - %s\n' "$name"
+    pass=$((pass + 1))
+  else
+    printf 'FAIL - %s: expected reason to %s %q, got: %s\n' "$name" "$mode" "$needle" "$text"
     fail=$((fail + 1))
   fi
 }
@@ -214,6 +236,34 @@ check "[acceptEdits] push origin main -> ask (human present)" ask \
 git -C "$WORK" checkout -q main
 check "[auto] commit on main -> deny" deny \
   "$(decision_for "$(push_mode 'git commit -m x' 'auto')" "$WORK")"
+git -C "$WORK" checkout -q claude/x
+
+# 11a. Reason wording: an `ask` offers a confirmation; a `deny` must not, or the
+#      agent retries a command that cannot succeed in this session (issue #33).
+#      A release-tag push is the case that surfaced it.
+tag_ask="$(reason_for "$(push_mode 'git push origin v1.3.0' 'default')" "$WORK")"
+check_text "[default] tag push reason states the cause" has \
+  "Push targets 'v1.3.0', not the worktree branch 'claude/x'" "$tag_ask"
+check_text "[default] tag push reason invites confirmation" has \
+  "— confirm before proceeding." "$tag_ask"
+
+tag_deny="$(reason_for "$(push_mode 'git push origin v1.3.0' 'auto')" "$WORK")"
+check_text "[auto] tag push deny keeps the cause" has \
+  "Push targets 'v1.3.0', not the worktree branch 'claude/x'" "$tag_deny"
+check_text "[auto] tag push deny is not confirm-shaped" lacks \
+  "confirm before proceeding" "$tag_deny"
+check_text "[auto] tag push deny names the mode" has "permission mode 'auto'" "$tag_deny"
+check_text "[auto] tag push deny says retrying won't help" has \
+  "Retrying won't help" "$tag_deny"
+
+# The same wording split applies to every ask site, not just pushes.
+git -C "$WORK" checkout -q main
+check_text "[auto] commit-on-main deny is not confirm-shaped" lacks "confirm before proceeding" \
+  "$(reason_for "$(push_mode 'git commit -m x' 'auto')" "$WORK")"
+check_text "[auto] edit-on-main deny is not confirm-shaped" lacks "confirm before proceeding" \
+  "$(reason_for "$(printf '{"tool_name":"Edit","tool_input":{"file_path":"%s/file.txt"},"permission_mode":"auto"}' "$WORK")" "$WORK")"
+check_text "[default] edit-on-main ask invites confirmation" has "— confirm before proceeding." \
+  "$(reason_for "$(printf '{"tool_name":"Edit","tool_input":{"file_path":"%s/file.txt"},"permission_mode":"default"}' "$WORK")" "$WORK")"
 git -C "$WORK" checkout -q claude/x
 
 # 11b. detached HEAD resolves to no branch, so the hook defers (even though the
