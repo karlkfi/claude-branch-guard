@@ -33,5 +33,10 @@ jobs:
         with:
           python-version: "3.13"
       # git and jq are preinstalled on windows-latest; the harness uses both.
+      - name: TEMP probe which launcher half cmd.exe vs posix
+        shell: bash
+        run: |
+          echo "--- probe: launcher error path reveals which half ran ---"
+          ./hooks/run-python-hook.cmd definitely-not-a-real-script.py 2>&1 || true
       - run: bash test/run.sh
         shell: bash
