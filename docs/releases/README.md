@@ -28,14 +28,16 @@ when each one applies.
 
 ## Verifying
 
-`--template '{{.body}}'` emits the stored body byte-for-byte; `--jq .body` appends a newline and
-would report a difference on every release that has one.
+Every file, or just the tags named as arguments:
 
 ```bash
-gh release view vX.Y.Z --json body --template '{{.body}}' | diff - docs/releases/vX.Y.Z.md
+./scripts/verify-release-notes.sh
 ```
 
-Silence means they agree. Because the comparison is byte-exact, it also catches a trailing newline
+It compares against `--template '{{.body}}'`, which emits the stored body byte-for-byte. `--jq .body`
+appends a newline and would report a difference on every release that already has one.
+
+Because the comparison is byte-exact, it also catches a trailing newline
 appearing or disappearing — `v1.1.0`, `v1.2.0`, `v1.3.0`, and `v1.3.1` were published without a
 final newline and are stored that way, so an editor that adds one on save will show up here. That
 is the check working: the file no longer matches what is published, and the fix is to re-publish it.

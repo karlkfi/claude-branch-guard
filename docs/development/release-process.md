@@ -64,13 +64,13 @@ grep -rn '"version"' .claude-plugin/
    gh release create vX.Y.Z --title "vX.Y.Z" --latest --notes-file docs/releases/vX.Y.Z.md
    ```
 
-9. **Verify the published body matches the file.** Silence means they agree:
+9. **Verify the published body matches the file.** With no arguments this checks every tag, not just the new one, so it also catches a body edited on an older release since the last run:
 
    ```
-   gh release view vX.Y.Z --json body --template '{{.body}}' | diff - docs/releases/vX.Y.Z.md
+   ./scripts/verify-release-notes.sh
    ```
 
-   Run this again after any later change to the body. It is the only thing that catches an edit made in the browser and never committed — see [`docs/releases/README.md`](../releases/README.md).
+   Run it again after any later change to a body. It is the only thing that catches an edit made in the browser and never committed — see [`docs/releases/README.md`](../releases/README.md).
 
 ## The direct-to-main exception
 
