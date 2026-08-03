@@ -19,7 +19,8 @@ REM PATH and `where` finds it. The interpreter must actually be run and its exit
 REM code checked. Probe order puts `python3` last precisely because it is the
 REM name most likely to be the stub.
 REM
-REM Usage: run-python-hook.cmd <script-path-relative-to-this-file> [args...]
+REM Usage: run-python-hook.cmd <script-path-relative-to-this-file>
+REM Hook input arrives on stdin, so no arguments are forwarded to the script.
 
 setlocal
 if "%~1"=="" (
@@ -29,7 +30,6 @@ if "%~1"=="" (
 
 set "HOOK_DIR=%~dp0"
 set "HOOK_SCRIPT=%HOOK_DIR%%~1"
-shift
 
 if not exist "%HOOK_SCRIPT%" (
     echo run-python-hook.cmd: script not found: %HOOK_SCRIPT% >&2
@@ -49,7 +49,7 @@ echo run-python-hook.cmd: this guard is NOT enforcing. Install Python 3 and ensu
 exit /b 1
 
 :found
-%INTERP% "%HOOK_SCRIPT%" %*
+%INTERP% "%HOOK_SCRIPT%"
 exit /b %ERRORLEVEL%
 
 :try_interp
@@ -71,7 +71,6 @@ CMDBLOCK
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_NAME="$1"
-shift
 
 if [ ! -f "${SCRIPT_DIR}/${SCRIPT_NAME}" ]; then
     echo "run-python-hook.cmd: script not found: ${SCRIPT_DIR}/${SCRIPT_NAME}" >&2
@@ -82,7 +81,7 @@ for interp in python3 python; do
     command -v "$interp" >/dev/null 2>&1 || continue
     if "$interp" -c 'import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)' \
         >/dev/null 2>&1; then
-        exec "$interp" "${SCRIPT_DIR}/${SCRIPT_NAME}" "$@"
+        exec "$interp" "${SCRIPT_DIR}/${SCRIPT_NAME}"
     fi
 done
 
