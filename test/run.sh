@@ -790,4 +790,25 @@ check "commit + heredoc on main -> ask" ask \
 git -C "$WORK" checkout -q claude/x
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
-[[ "$fail" -eq 0 ]]
+
+# CLAUDE.md backs its launcher-coverage claim with this suite's case count.
+# That number is prose, so nothing stopped a fixture from landing and leaving
+# it stale -- it had drifted by three before anyone noticed. Assert it here
+# rather than in CI: a case count is only knowable by running the suite, and
+# the suite already runs on every job. This check is not itself a fixture, so
+# it does not perturb the number it is checking.
+counts_ok=1
+if [[ -f "$REPO_ROOT/CLAUDE.md" ]]; then
+  documented="$(grep -oE 'covered by all [0-9]+ cases' "$REPO_ROOT/CLAUDE.md" \
+    | grep -oE '[0-9]+' || true)"
+  if [[ -z "$documented" ]]; then
+    printf 'CLAUDE.md no longer states a case count; update it or this check\n' >&2
+    counts_ok=0
+  elif [[ "$documented" -ne $((pass + fail)) ]]; then
+    printf 'CLAUDE.md says %s cases, this run had %d\n' \
+      "$documented" "$((pass + fail))" >&2
+    counts_ok=0
+  fi
+fi
+
+[[ "$fail" -eq 0 && "$counts_ok" -eq 1 ]]
