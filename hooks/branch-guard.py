@@ -8,7 +8,8 @@ For Bash `git`/`gh` commands it emits a per-command decision:
   allow  — safe to auto-approve (read-only git/gh, staging, branch creation,
            fetch, a commit/push of a feature/worktree branch, …);
   ask    — confirm first (commit/edit/push to a protected branch, or a
-           destructive command like `reset --hard`, `clean -f`, `branch -D`);
+           destructive command like `reset --hard`, `clean -f`, a `branch -D`
+           of unpushed work);
   (none) — defer: emit nothing, so the normal permission flow applies.
 
 A command is auto-approved only when EVERY segment in it is recognized-safe — a
@@ -791,7 +792,72 @@ def short_flag_letters(args):
     return letters
 
 
-def classify_git(sub, args, branch, policy):
+def classify_branch(args, current, cwd):
+    """Verdict for `git branch`, split by what can actually lose work.
+
+    `-d` and `-D` are not the same risk and git already knows it: `-d` refuses
+    unless the branch is merged, while `-D` is `--delete --force` and deletes
+    regardless. So a plain `-d` needs no prompt — git enforces the check the
+    hook would be duplicating — and a rename moves a ref without dropping one.
+    A force delete asks only when the commits would really be gone: if the tip
+    is reachable from a remote-tracking ref, `git fetch` still has it.
+
+      -d (no force)   allow — git refuses an unmerged delete itself
+      -m / --move     allow — a rename moves the ref; git refuses to clobber
+      -c / --copy     allow — creates a branch, like a plain create
+      -D, -d --force  allow when every named branch's tip is on a remote;
+                      otherwise ask (this is the case worth a prompt)
+      -M / -C / -f    ask — each force-moves a branch pointer over whatever is
+                      already there, orphaning it
+      protected name  ask — deleting or renaming away main/master is a
+                      protected-branch operation however it's spelled
+
+    Anything else (list, create, `--set-upstream-to`, …) allows as before.
+    Watch the flag parse: `git branch -d --force x` is `-D` spelled long, so
+    force is a separate question from which letter was typed.
+    """
+    flags = {a for a in args if a.startswith('-')}
+    short = short_flag_letters(args)
+    names = [a for a in args if not a.startswith('-')]
+
+    force = bool(short & {'f', 'D', 'M', 'C'}) or '--force' in flags
+    delete = bool(short & {'d', 'D'}) or '--delete' in flags
+    move = bool(short & {'m', 'M'}) or '--move' in flags
+    copy = bool(short & {'c', 'C'}) or '--copy' in flags
+
+    if delete:
+        for n in names:
+            if is_protected(n):
+                return ('ask', f"Deleting protected branch '{n}'")
+        if not force:
+            return ('allow', None)
+        published = branches_on_a_remote(cwd, names)
+        if published:
+            return ('allow', None)
+        if published is None:
+            return ('ask', "`git branch -D` force-deletes a branch and the hook "
+                           "couldn't check whether its commits are on a remote")
+        return ('ask', "`git branch -D` force-deletes a branch whose commits "
+                       "are on no remote-tracking branch")
+    if move:
+        # The branch a rename moves AWAY from is the one that stops existing:
+        # `git branch -m <old> <new>` names it, `git branch -m <new>` means the
+        # branch checked out here. Renaming TO a protected name creates one, and
+        # a create allows like any other.
+        renamed = names[0] if len(names) >= 2 else current
+        if renamed and is_protected(renamed):
+            return ('ask', f"Renaming protected branch '{renamed}'")
+    if move or copy:
+        if force:
+            return ('ask', "`git branch {}` overwrites an existing branch of that "
+                           "name".format('-M' if move else '-C'))
+        return ('allow', None)
+    if force:
+        return ('ask', "`git branch -f` moves an existing branch pointer")
+    return ('allow', None)                # list or create
+
+
+def classify_git(sub, args, branch, policy, cwd):
     """Verdict ('allow' | 'ask' | 'defer', reason) for a `git <sub>` command."""
     flags = {a for a in args if a.startswith('-')}
     short = short_flag_letters(args)
@@ -827,9 +893,7 @@ def classify_git(sub, args, branch, policy):
             return ('allow', None)        # unambiguous branch create
         return ('defer', None)            # ambiguous (branch vs path discard) -> normal flow
     if sub == 'branch':
-        if short & {'d', 'D', 'm', 'M', 'f'} or flags & {'--delete', '--move', '--force'}:
-            return ('ask', "Deleting/renaming a git branch")
-        return ('allow', None)            # list or create
+        return classify_branch(args, branch, cwd)
     if sub == 'tag':
         if 'd' in short or '--delete' in flags:
             return ('ask', "Deleting a git tag")
@@ -974,7 +1038,7 @@ def classify_gh(sub, args):
     return ('defer', None)
 
 
-def classify_segment(inv, branch, policy):
+def classify_segment(inv, branch, policy, cwd):
     """Verdict ('nongit' | 'allow' | 'ask' | 'defer', reason) for one segment.
     'nongit' marks a segment that isn't a git/gh invocation (so the whole
     command can't be auto-approved)."""
@@ -984,7 +1048,7 @@ def classify_segment(inv, branch, policy):
         return classify_gh(inv['sub'] or '', inv['args'])
     if inv['sub'] is None:
         return ('defer', None)            # bare `git`
-    verdict, reason = classify_git(inv['sub'], inv['args'], branch, policy)
+    verdict, reason = classify_git(inv['sub'], inv['args'], branch, policy, cwd)
     # An inline-config escape hatch blocks auto-allow, but must not weaken a
     # protective `ask` (e.g. `git -c k=v commit` on main still asks).
     if verdict == 'allow' and (set(inv['globals']) & GIT_ESCAPE_HATCHES):
@@ -1011,6 +1075,42 @@ def current_branch(cwd):
     if r.returncode != 0:
         return None
     return r.stdout.strip() or None
+
+
+def branches_on_a_remote(cwd, names):
+    """True when every named local branch's tip is reachable from some
+    remote-tracking ref, so deleting it loses nothing a `git fetch` can't get
+    back; False when at least one carries commits no remote has; None when the
+    question can't be answered (a name that doesn't resolve, not a repo, git
+    unavailable or slow) and the caller should ask.
+
+    One `git rev-list --count <refs> --not --remotes` answers it for the whole
+    list: the count is commits reachable from the named branches but from no
+    remote-tracking ref, so 0 means every tip is already published. A repo with
+    no remotes counts every commit, which is the right answer — nothing is
+    published there. Names are looked up as `refs/heads/<name>` so a same-named
+    tag can't stand in for a branch, and so no name can reach rev-list looking
+    like an option.
+
+    An empty `names` MUST return None rather than run the command: with no
+    positive refs the count is 0, which would read as "all published". The
+    3s timeout is deliberately shorter than `current_branch`'s 5s — both can run
+    in one invocation and Claude Code kills a hook at 10s, at which point it
+    stops enforcing entirely; a timeout here only costs a prompt."""
+    if not names:
+        return None
+    refs = ['refs/heads/' + n for n in names]
+    try:
+        r = subprocess.run(
+            ['git', '-C', cwd, 'rev-list', '--count'] + refs + ['--not', '--remotes'],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    out = r.stdout.strip()
+    return out == '0' if out.isdigit() else None
 
 
 def is_protected(branch):
@@ -1076,7 +1176,8 @@ def main():
             return                                 # no git/gh command -> defer
 
         policy = push_policy()
-        branch = current_branch(data.get('cwd') or os.getcwd())
+        cwd = data.get('cwd') or os.getcwd()
+        branch = current_branch(cwd)
         verdicts = []
         for (seg, writes), inv in zip(segments, invs):
             if inv is None:
@@ -1096,7 +1197,7 @@ def main():
                 else:
                     verdicts.append(('nongit', None))
             else:
-                verdict, reason = classify_segment(inv, branch, policy)
+                verdict, reason = classify_segment(inv, branch, policy, cwd)
                 # An output redirect to a file is a write side-effect the
                 # classifier can't see (`git log --format=… > f` writes
                 # possibly-attacker-influenced content). Downgrade a would-be

@@ -81,6 +81,9 @@ the default `strict` [push policy](#push-guard).
 | `git commit -F- <<'EOF' … EOF` *(feature branch; heredoc body is opaque data)* | allow |
 | `git fetch 2>/dev/null` / `git log >/dev/null 2>&1` *(discard redirect / fd-dup)* | allow |
 | `git pull --ff-only` | allow |
+| `git branch -d old` *(git refuses an unmerged delete itself)* | allow |
+| `git branch -D old` *(tip reachable from a remote-tracking branch)* | allow |
+| `git branch -m old new` / `git branch -c old new` | allow |
 | `git commit -m "fix"` *(on `main`)* | **ask** |
 | editing a file whose repo is on `main` *(Edit/Write/MultiEdit/NotebookEdit)* | **ask** |
 | `git push origin main` / `git push origin HEAD:main` | **ask** |
@@ -88,7 +91,9 @@ the default `strict` [push policy](#push-guard).
 | `git push origin v1.3.0` / `git push origin refs/tags/v1.3.0` / `git push --tags` *(publishes a tag, strict policy)* | **ask** |
 | `git reset --hard HEAD~1` | **ask** |
 | `git clean -fd` | **ask** |
-| `git branch -D old` | **ask** |
+| `git branch -D old` *(commits on no remote-tracking branch)* | **ask** |
+| `git branch -d main` / `git branch -m main other` *(protected branch)* | **ask** |
+| `git branch -M old new` / `git branch -C old new` / `git branch -f b start` *(force-moves a branch pointer)* | **ask** |
 | `gh pr merge 5 --delete-branch` / `gh pr close 5 -d` *(deletes the branch)* | **ask** |
 | `gh repo delete owner/repo` / `gh label delete bug` *(deletes a resource)* | **ask** |
 | `gh release delete v1` / `gh release delete-asset v1 file.zip` / `gh secret delete X` / `gh variable delete Y` / `gh gist delete abc` / `gh cache delete 1` *(deletes a resource; `secret`/`variable` also via the `remove` alias)* | **ask** |
@@ -132,6 +137,21 @@ file and keep allowing (`git fetch 2>/dev/null` stays auto-approved).
 switch branches or discard a file's changes — and the hook defers on ambiguity
 rather than guess. Only the unambiguous branch-create form (`git checkout -b`)
 auto-approves.
+
+`git branch` is tiered by what can actually lose work rather than by which
+letter was typed. `git branch -d` **allows**: git refuses to delete a branch
+that isn't fully merged, so a prompt here only duplicates a check git already
+enforces. A rename (`-m`) or copy (`-c`) allows for the same reason — the ref
+moves, and git refuses to clobber a name that already exists. `git branch -D` is
+the real force delete, and it's judged on whether the commits survive elsewhere:
+the hook runs one `git rev-list --count refs/heads/<name> --not --remotes`, and
+if every named tip is already reachable from a remote-tracking ref the delete
+**allows**, since a `git fetch` still has the work. Commits on no remote, a name
+that doesn't resolve, and a repo with no remotes at all each **ask** — as does
+deleting or renaming away `main`/`master`, however it's spelled. So do the
+force-overwrite forms (`-M`, `-C`, `-f`), each of which moves a branch pointer
+over whatever it already pointed at. Note that `git branch -d --force` is `-D`
+spelled long and is treated as one.
 
 One narrow relaxation of the all-segments rule covers a constant AI-agent habit:
 piping read-only git/gh output through a pager. A trailing segment also counts as
@@ -444,7 +464,8 @@ update step and restart.
    `switch -c`, `worktree add`, branch/tag create) allow on any branch;
    branch-sensitive mutations (`commit`, `merge`, `rebase`, `cherry-pick`,
    `stash`, `push`) allow on a feature branch and ask on a protected one;
-   destructive commands (`reset --hard`, `clean -f`, `branch -D`, and gh
+   destructive commands (`reset --hard`, `clean -f`, a `branch -D` whose
+   commits are on no remote, and gh
    deletes/disables — a branch via `gh pr merge|close --delete-branch` or
    `gh api -X DELETE …/git/refs/heads/…`; a repo via `gh repo delete` or
    `gh api -X DELETE repos/{o}/{r}`; a label via `gh label delete` /
@@ -454,6 +475,8 @@ update step and restart.
    `gh workflow disable`) ask; unknown or
    ambiguous forms defer. The branch is resolved with
    `git symbolic-ref` (the session cwd for Bash, the file's own repo for edits).
+   `git branch -D` additionally reads `git rev-list --count … --not --remotes`
+   to see whether the branch's commits are already on a remote.
 5. **Combine** the segment verdicts: any `ask` → ask; else every segment must be
    recognized-safe → allow; else defer. A segment is recognized-safe when it's a
    git/gh `allow` or a **pure read-only filter** piped after one — `head`,
@@ -507,8 +530,13 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   `gh pr view "$(git branch --show-current)"` auto-approve. Any other `$(…)` (or
   adding an argument/redirect inside these) still prompts — prefer these exact
   forms.
+- **Delete branches with `-d`, and push before you `-D`.** `git branch -d` and
+  `git branch -m` auto-approve. `git branch -D` auto-approves only when the
+  branch's commits are already on a remote; force-deleting unpushed work
+  prompts, as do `-M`/`-C`/`-f`, which move a branch pointer over an existing
+  one.
 - **Expect a prompt for destructive commands** (`reset --hard`, `clean -f`,
-  `branch -D`, `restore <path>`, `config --global`) — that's by design.
+  `restore <path>`, `config --global`) — that's by design.
 ```
 
 ## Configuration
@@ -555,6 +583,11 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   lexical check, not a sandbox — the filesystem boundary is workspace-guard's
   job, and a hard guarantee belongs in a git `pre-push` hook or server-side
   branch protection.
+- The `git branch -D` auto-approval trusts your **remote-tracking refs**, which
+  are a local cache: if someone force-pushed over `origin/x` since your last
+  fetch, the commits it names may no longer be on the server. The delete is
+  still recoverable from the reflog, but "on a remote" means "on a remote as of
+  your last fetch".
 - The push guard parses the command string, so unusual refspecs may not be
   classified (it asks/defers rather than allowing). Auto-approval is a
   convenience layer, not a security boundary — for hard guarantees use a git
@@ -593,8 +626,9 @@ Install it the same way as branch-guard:
 
 The hook runs entirely on your machine and has no network access, telemetry, or
 analytics. It reads the pending Bash/edit command and resolves the current branch
-with `git symbolic-ref`, decides in memory, and never opens file contents or writes
-anything to disk.
+with `git symbolic-ref` (plus, for a `git branch -D`, a local `git rev-list`
+count of commits not yet on a remote), decides in memory, and never opens file
+contents or writes anything to disk.
 
 ## Contributing
 

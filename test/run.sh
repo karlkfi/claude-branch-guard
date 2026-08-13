@@ -424,7 +424,9 @@ check "git reset --soft -> none (defer)" none \
   "$(decision_for "$(bash_cmd 'git reset --soft HEAD~1')" "$WORK")"
 check "git clean -fd -> ask" ask \
   "$(decision_for "$(bash_cmd 'git clean -fd')" "$WORK")"
-check "git branch -D -> ask" ask \
+# `old` doesn't exist here, so the reachability check can't clear it -> ask.
+# Section 24 covers the resolvable cases on both sides of that check.
+check "git branch -D <unresolvable name> -> ask" ask \
   "$(decision_for "$(bash_cmd 'git branch -D old')" "$WORK")"
 check "git restore (worktree) -> ask" ask \
   "$(decision_for "$(bash_cmd 'git restore file.txt')" "$WORK")"
@@ -788,6 +790,90 @@ git -C "$WORK" checkout -q main
 check "commit + heredoc on main -> ask" ask \
   "$(decision_for "$(bash_payload "$(printf 'git commit -F- <<'"'"'EOF'"'"'\nmsg\nEOF')")" "$WORK")"
 git -C "$WORK" checkout -q claude/x
+
+# ---------------------------------------------------------------------------
+# 24. `git branch` delete/rename tiering. `-d` and `-D` are not the same risk
+#     and git already knows it: it refuses an unmerged `-d`, so the hook doesn't
+#     duplicate that check, while `-D` asks only when the commits are on no
+#     remote. The remote-tracking ref is written with `update-ref` — the
+#     reachability check reads refs/remotes/… and never touches a network, so
+#     the fixture needs no remote repository.
+git -C "$WORK" checkout -q claude/x
+git -C "$WORK" update-ref refs/remotes/origin/main "$(git -C "$WORK" rev-parse main)"
+git -C "$WORK" branch published main
+git -C "$WORK" checkout -q -b unpublished main
+printf 'local work\n' >> "$WORK/file.txt"
+git -C "$WORK" commit -qam "unpublished work"
+git -C "$WORK" checkout -q claude/x
+
+# -d cannot lose work whatever it names: git refuses unless the branch is merged.
+check "git branch -d published -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -d published')" "$WORK")"
+check "git branch --delete unpublished -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch --delete unpublished')" "$WORK")"
+# A force delete is judged on whether the commits survive on a remote.
+check "git branch -D published (tip on origin/main) -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -D published')" "$WORK")"
+check "git branch -D unpublished -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -D unpublished')" "$WORK")"
+check "git branch -D published unpublished -> ask (one unsafe name is enough)" ask \
+  "$(decision_for "$(bash_cmd 'git branch -D published unpublished')" "$WORK")"
+# `-d --force` is `-D` spelled long, so the test is force, not the letter typed.
+check "git branch -d --force published -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -d --force published')" "$WORK")"
+check "git branch -d --force unpublished -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -d --force unpublished')" "$WORK")"
+# Protected names ask whichever flag deletes them, reachable or not.
+check "git branch -d main -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -d main')" "$WORK")"
+check "git branch -D main -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -D main')" "$WORK")"
+
+# A rename moves a ref; git refuses to clobber, so nothing is dropped.
+check "git branch -m old new -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -m old new')" "$WORK")"
+check "git branch --move old new -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch --move old new')" "$WORK")"
+check "git branch -m renamed (current branch) -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -m renamed')" "$WORK")"
+check "git branch -c a b (copy) -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -c a b')" "$WORK")"
+# The force forms overwrite an existing branch of that name -> ask.
+check "git branch -M old new -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -M old new')" "$WORK")"
+check "git branch -C a b -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -C a b')" "$WORK")"
+check "git branch -f b start -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -f b start')" "$WORK")"
+# Renaming a protected branch AWAY asks, including the current-branch form.
+check "git branch -m main other -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -m main other')" "$WORK")"
+git -C "$WORK" checkout -q main
+check "git branch -m renamed on main -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -m renamed')" "$WORK")"
+git -C "$WORK" checkout -q claude/x
+# Listing and creating are untouched by the split.
+check "git branch -a -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -a')" "$WORK")"
+check "git branch -vv -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -vv')" "$WORK")"
+check "git branch newbranch (create) -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch newbranch')" "$WORK")"
+
+# Each surviving ask says what the command actually does. One bucket reading
+# "Deleting/renaming" for all of them is what made `git branch -f <new> <start>`
+# report a deletion it wasn't performing.
+check_text "-D reason names the missing remote" has "on no remote-tracking branch" \
+  "$(reason_for "$(bash_cmd 'git branch -D unpublished')" "$WORK")"
+check_text "-f reason is not about deleting" lacks "Delet" \
+  "$(reason_for "$(bash_cmd 'git branch -f b start')" "$WORK")"
+check_text "-M reason is about overwriting" has "overwrites an existing branch" \
+  "$(reason_for "$(bash_cmd 'git branch -M old new')" "$WORK")"
+check_text "-d main reason names the protected branch" has "Deleting protected branch 'main'" \
+  "$(reason_for "$(bash_cmd 'git branch -d main')" "$WORK")"
+# The surviving ask converts to deny when unattended, like every other.
+check "[auto] git branch -D unpublished -> deny" deny \
+  "$(decision_for "$(push_mode 'git branch -D unpublished' 'auto')" "$WORK")"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 
