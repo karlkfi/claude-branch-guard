@@ -16,8 +16,8 @@ every git command or prompt on every one.
 branch-guard is a `PreToolUse` hook that classifies each `git`/`gh` command,
 **auto-approves the safe ones** (read-only, staging, branch/worktree creation,
 commits and pushes on a feature branch), and **prompts** before anything that
-touches a protected branch (`main`/`master`) or is destructive. Everything else
-defers to your normal permission settings.
+touches a protected branch (`main`/`master`, plus any you add) or is destructive.
+Everything else defers to your normal permission settings.
 
 ## Contents
 
@@ -269,6 +269,10 @@ variable:
 A bare `git push` / `git push origin` pushes the current branch to its same-named
 upstream: under `strict` it is auto-approved (it's the worktree branch); under
 `protected` it defers.
+
+Wherever these rows say `main`/`master`, they mean the protected set — which you
+can widen with [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration), so
+`git push origin release/2.0` asks under `protected` once `release/*` is in it.
 
 **Tags.** Publishing a tag isn't a push of the worktree branch, so under `strict`
 it asks — whichever way it's spelled (`git push origin v1.3.0`,
@@ -561,9 +565,24 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   { "env": { "BRANCH_GUARD_PUSH_POLICY": "protected" } }
   ```
 
-- **Protected branches** — the default set is `main` and `master`, defined by
-  `PROTECTED_BRANCH_RE` at the top of `hooks/branch-guard.py`. Edit the regex to
-  protect additional branches (e.g. `release/*`).
+- **Protected branches** — `main` and `master` are always protected. Protect more
+  by setting `BRANCH_GUARD_PROTECTED_BRANCHES` to a comma-separated list of glob
+  patterns, in the same `settings.json`:
+
+  ```json
+  { "env": { "BRANCH_GUARD_PROTECTED_BRANCHES": "release/*,integration" } }
+  ```
+
+  Each pattern matches a whole branch name, case-sensitively, and `*` spans `/` —
+  so `release/*` covers both `release/2.0` and `release/2.0/rc`. Empty and
+  whitespace-only entries are ignored.
+
+  The list **extends** the defaults rather than replacing them. There is no way
+  to configure `main` or `master` out of the protected set, so a typo (or a
+  value the hook can't make sense of) can only ever protect more than you meant,
+  never less. The setting reaches every place the guard consults a branch:
+  commits and branch-sensitive mutations, the `Edit`/`Write` check, and the push
+  guard's protected-target rule under both `strict` and `protected`.
 
 - **Non-interactive modes** — in `auto`, `dontAsk`, and `bypassPermissions` an
   `ask` is automatically emitted as `deny` so the guard fails safe when no human

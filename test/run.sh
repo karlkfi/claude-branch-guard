@@ -83,11 +83,14 @@ setup_repo() {
   git -C "$WORK" branch claude/x
 }
 
-# decision_for PAYLOAD CWD [ENV_KV] -> echoes the permissionDecision, or "none".
-# ENV_KV is an optional `NAME=value` passed into the hook's environment.
+# decision_for PAYLOAD CWD [NAME=value ...] -> echoes the permissionDecision, or
+# "none". Trailing args go into the hook's environment. They are passed to `env`
+# quoted (`"$@"`), so a value may contain a glob (`release/*`) without the shell
+# expanding it against the working directory.
 decision_for() {
-  local payload="$1" cwd="$2" env_kv="${3:-}" out
-  out="$( cd "$cwd" && printf '%s' "$payload" | env ${env_kv} "$LAUNCHER" "$HOOK_SCRIPT" )"
+  local payload="$1" cwd="$2" out
+  shift 2
+  out="$( cd "$cwd" && printf '%s' "$payload" | env "$@" "$LAUNCHER" "$HOOK_SCRIPT" )"
   if [[ -z "$out" ]]; then
     printf 'none'
   else
@@ -95,10 +98,12 @@ decision_for() {
   fi
 }
 
-# reason_for PAYLOAD CWD [ENV_KV] -> echoes the permissionDecisionReason, or "".
+# reason_for PAYLOAD CWD [NAME=value ...] -> echoes the permissionDecisionReason,
+# or "".
 reason_for() {
-  local payload="$1" cwd="$2" env_kv="${3:-}" out
-  out="$( cd "$cwd" && printf '%s' "$payload" | env ${env_kv} "$LAUNCHER" "$HOOK_SCRIPT" )"
+  local payload="$1" cwd="$2" out
+  shift 2
+  out="$( cd "$cwd" && printf '%s' "$payload" | env "$@" "$LAUNCHER" "$HOOK_SCRIPT" )"
   if [[ -n "$out" ]]; then
     printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecisionReason'
   fi
@@ -906,6 +911,77 @@ check_text "branch -f ask still invites a confirmation" has \
 del_reason="$(reason_for "$(bash_cmd 'git branch -D orphan')" "$WORK")"
 check_text "branch -D reason says why it isn't recoverable" has \
   "isn't reachable from any remote-tracking branch or main" "$del_reason"
+
+# 25. The protected set is configurable at runtime via
+#     BRANCH_GUARD_PROTECTED_BRANCHES (comma-separated globs), the same way the
+#     push policy is. It EXTENDS main/master rather than replacing them, so no
+#     value — however garbled — can unprotect the defaults.
+git -C "$WORK" branch release/1.2
+git -C "$WORK" branch release/2.0/rc
+git -C "$WORK" branch integration
+BR='BRANCH_GUARD_PROTECTED_BRANCHES=release/*,integration'
+
+# Unset, a release branch is an ordinary feature branch: this is the behavior
+# that used to need an edit to the hook file to change.
+git -C "$WORK" checkout -q release/1.2
+check "[unset] commit on release/1.2 -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git commit -m x')" "$WORK")"
+check "[configured] commit on release/1.2 -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git commit -m x')" "$WORK" "$BR")"
+check_text "[configured] reason names the configured branch" has \
+  "Targets protected branch 'release/1.2'" \
+  "$(reason_for "$(bash_cmd 'git commit -m x')" "$WORK" "$BR")"
+# fnmatch's `*` spans `/`, so one `release/*` entry covers nested release refs.
+git -C "$WORK" checkout -q release/2.0/rc
+check "[configured] commit on release/2.0/rc -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git commit -m x')" "$WORK" "$BR")"
+# A glob-free entry protects exactly that branch, and matching is
+# case-sensitive (fnmatchcase), like git's own branch names.
+git -C "$WORK" checkout -q integration
+check "[configured] commit on integration -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git commit -m x')" "$WORK" "$BR")"
+check "[configured] pattern 'Integration' doesn't match 'integration' -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git commit -m x')" "$WORK" \
+     'BRANCH_GUARD_PROTECTED_BRANCHES=Integration')"
+# Extend-only: the defaults survive a config that never mentions them, and a
+# branch matching no pattern is unaffected.
+git -C "$WORK" checkout -q main
+check "[configured] commit on main still -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git commit -m x')" "$WORK" "$BR")"
+git -C "$WORK" checkout -q claude/x
+check "[configured] commit on claude/x -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git commit -m x')" "$WORK" "$BR")"
+# Garbled input (empty and whitespace-only entries) fails safe to the defaults
+# rather than protecting nothing.
+git -C "$WORK" checkout -q main
+check "[garbled] commit on main still -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git commit -m x')" "$WORK" \
+     'BRANCH_GUARD_PROTECTED_BRANCHES=  , ,')"
+git -C "$WORK" checkout -q claude/x
+check "[garbled] commit on claude/x -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git commit -m x')" "$WORK" \
+     'BRANCH_GUARD_PROTECTED_BRANCHES=  , ,')"
+# The edit path and the push guard's protected-target check read the same set.
+git -C "$WORK" checkout -q release/1.2
+check "[configured] edit of a file on release/1.2 -> ask" ask \
+  "$(decision_for "$(edit_payload Edit file_path "$WORK/file.txt")" "$WORK" "$BR")"
+git -C "$WORK" checkout -q claude/x
+check "[protected] push origin release/1.2 -> none (unset)" none \
+  "$(decision_for "$(push 'git push origin release/1.2')" "$WORK" "$PROT")"
+check "[protected+configured] push origin release/1.2 -> ask" ask \
+  "$(decision_for "$(push 'git push origin release/1.2')" "$WORK" "$PROT" "$BR")"
+# And a configured ask still becomes a deny where no human can answer.
+check "[protected+configured][auto] push origin integration -> deny" deny \
+  "$(decision_for "$(push_mode 'git push origin integration' 'auto')" "$WORK" "$PROT" "$BR")"
+
+# `git branch`'s ownership tier (section 24) calls a target in bounds only when
+# it is recoverable AND private, and reads "private" from `is_protected` — so
+# configuring a branch withdraws that auto-approve too. release/1.2 sits at
+# main's tip, so it stays recoverable throughout and only privacy moves.
+check "[unset] branch -D release/1.2 -> allow (recoverable and private)" allow \
+  "$(decision_for "$(bash_cmd 'git branch -D release/1.2')" "$WORK")"
+check "[configured] branch -D release/1.2 -> ask (no longer private)" ask \
+  "$(decision_for "$(bash_cmd 'git branch -D release/1.2')" "$WORK" "$BR")"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 

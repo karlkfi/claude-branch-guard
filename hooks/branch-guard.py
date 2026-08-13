@@ -42,6 +42,8 @@ in it runs) is kept in the stream so the substitution guard still defers.
 
 Also guards file edits (Edit/Write/MultiEdit/NotebookEdit) against the branch of
 the file's own repository, and `git push` according to BRANCH_GUARD_PUSH_POLICY.
+The protected set is `main`/`master` plus any glob patterns in
+BRANCH_GUARD_PROTECTED_BRANCHES (see `protected_patterns`).
 
 Reads the hook JSON on stdin, emits a PreToolUse decision on stdout. On any
 parsing uncertainty (unbalanced quotes, empty input, unresolvable branch,
@@ -60,9 +62,22 @@ Scope note: branch-guard reasons about git/branch *semantics*. The filesystem
 boundary (commands touching paths outside the workspace) is workspace-guard's
 job; the two don't overlap.
 """
-import sys, os, json, re, shlex, subprocess
+import sys, os, json, re, shlex, subprocess, fnmatch
 
-PROTECTED_BRANCH_RE = re.compile(r'^(main|master)$')
+# Branch names protected no matter what the environment says. Configuration only
+# ever ADDS to this set (see `protected_patterns`), so a typo — or an empty or
+# nonsense BRANCH_GUARD_PROTECTED_BRANCHES — can't quietly drop protection from
+# the two branches that most need it.
+DEFAULT_PROTECTED_BRANCHES = ('main', 'master')
+
+# Extra protected branches, as a comma-separated list of shell globs
+# (`release/*,integration,v?.x`). Read at runtime like BRANCH_GUARD_PUSH_POLICY,
+# so it can be set from settings.json rather than by editing this file — an edit
+# here lives in the plugin cache and is reverted by the next plugin update.
+# Globs rather than regexes: a glob is how people already write branch patterns,
+# and `fnmatch` can't raise on a malformed one the way `re.compile` can. Note
+# `*` spans `/`, so `release/*` covers `release/2.0/rc` too.
+PROTECTED_BRANCHES_ENV = 'BRANCH_GUARD_PROTECTED_BRANCHES'
 
 # POSIX command-prefix assignment (`FOO=bar git commit`): NAME then `=`.
 # Bash treats leading assignments as inline env exports; they don't change
@@ -1188,8 +1203,27 @@ def tip_is_recoverable(cwd, name):
     return bool(r.stdout.strip())
 
 
+def protected_patterns():
+    """The protected-branch glob patterns: the built-in defaults plus each
+    non-empty comma-separated entry of BRANCH_GUARD_PROTECTED_BRANCHES.
+
+    Extend-only by design. There is no way to configure the defaults away, so
+    bad input can only ever protect MORE than intended, never less — an unset,
+    empty, or all-whitespace value leaves exactly today's `main`/`master` set,
+    and a garbled pattern just fails to match anything. That makes the
+    fail-safe structural rather than something the parser has to get right."""
+    extra = os.environ.get(PROTECTED_BRANCHES_ENV) or ''
+    return list(DEFAULT_PROTECTED_BRANCHES) + [
+        p for p in (e.strip() for e in extra.split(',')) if p
+    ]
+
+
 def is_protected(branch):
-    return bool(PROTECTED_BRANCH_RE.match(branch))
+    """True if `branch` matches a protected pattern. Case-sensitive
+    (`fnmatchcase`), matching git's own branch-name semantics and keeping the
+    result identical on every platform — plain `fnmatch` folds case on Windows
+    only, so the same config would protect a different set there."""
+    return any(fnmatch.fnmatchcase(branch, p) for p in protected_patterns())
 
 
 def emit(decision, reason):
