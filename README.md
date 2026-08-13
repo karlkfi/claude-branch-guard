@@ -105,6 +105,7 @@ the default `strict` [push policy](#push-guard).
 | `git config --global user.name x` | **ask** |
 | `git pull` *(may merge or rebase)* | **ask** |
 | `git rebase`/`git merge` *(onto `main`)* | **ask** |
+| editing a **gitignored** path on `main` *(`tmp/scratch.json` — nothing the branch can contain)* | defer |
 | `git status && rm -rf foo` *(non-git segment)* | defer |
 | `git log --format=… > out.txt` *(redirects git output to a real file)* | defer |
 | `git status ; echo x > out.txt` *(benign segment writes a file)* | defer |
@@ -258,6 +259,16 @@ session's cwd is a feature-branch worktree. A **relative** `file_path` is first
 resolved against the session's `cwd` (from the hook payload), so an edit inside a
 nested worktree resolves to the worktree's branch even when the hook process runs
 from the parent checkout — not falsely against the parent's `main`.
+
+A **gitignored** path is exempt: writing `tmp/scratch.json` on `main` gets no
+prompt, because an ignored file holds no branch contents and the decision would
+be identical on a feature branch. The check is `git check-ignore`, run only when
+the branch is protected — so a feature-branch edit costs nothing extra — and only
+its "yes, ignored" answer withdraws the prompt. Every other answer, including
+every answer it can't give (the path is outside the worktree, the repo won't
+open, git isn't available), leaves the **ask** in place. A file that matches an
+ignore rule but is *tracked* anyway (`git add -f`) still asks: `check-ignore`
+consults the index, and edits to that file really do land on the branch.
 
 ## Push guard
 
@@ -537,6 +548,10 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   all run without a prompt on a `claude/*` or feature branch; the same on
   main/master prompts. Use `git switch -c claude/<topic>` (or a worktree) before
   editing or committing.
+- **Scratch files go in a gitignored path.** Writing `tmp/notes.json` (or any
+  path covered by `.gitignore`) never prompts, on any branch — an ignored file
+  holds no branch contents. A file that's tracked despite matching an ignore
+  rule still prompts on main/master.
 - **Push the worktree's own branch.** `git push` / `git push -u origin HEAD`
   auto-approves; pushing a different branch or a refspec like `HEAD:main` prompts.
 - **Prefer fast-forward pulls.** `git pull --ff-only` is auto-approved; a bare
@@ -661,9 +676,11 @@ Install it the same way as branch-guard:
 ## Privacy
 
 The hook runs entirely on your machine and has no network access, telemetry, or
-analytics. It reads the pending Bash/edit command and resolves the current branch
-with `git symbolic-ref`, decides in memory, and never opens file contents or writes
-anything to disk.
+analytics. It reads the pending Bash/edit command and asks `git` a few read-only
+questions about the repository — the current branch (`symbolic-ref`), whether a
+branch exists and where its commits survive (`show-ref`, `for-each-ref`), and
+whether a path is ignored (`check-ignore`) — then decides in memory. It never
+opens the contents of the file being edited and never writes anything to disk.
 
 ## Contributing
 

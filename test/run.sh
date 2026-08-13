@@ -78,7 +78,14 @@ setup_repo() {
   git -C "$WORK" config user.name "Test"
   git -C "$WORK" config user.email "test@example.com"
   printf 'hello\n' > "$WORK/file.txt"
+  # A gitignored scratch dir, plus a file that matches an ignore rule yet is
+  # tracked anyway (`add -f`) — the case that separates "ignored" from "has no
+  # branch contents". See section 5d.
+  printf 'tmp/\nforced.txt\n' > "$WORK/.gitignore"
+  mkdir -p "$WORK/tmp"
+  printf 'tracked anyway\n' > "$WORK/forced.txt"
   git -C "$WORK" add -A
+  git -C "$WORK" add -f forced.txt
   git -C "$WORK" commit -q -m "init"
   git -C "$WORK" branch claude/x
 }
@@ -248,6 +255,32 @@ check "edit rel path honors payload cwd (worktree on claude/x) -> none" none \
 check "edit rel path honors payload cwd (main checkout) -> ask" ask \
   "$(decision_for "$(edit_payload Edit file_path file.txt "$WORK")" "$REPO_ROOT")"
 git -C "$WORK" worktree remove -f "$WT"
+
+# 5d. A gitignored path holds no branch contents, so editing one on a protected
+#     branch is the same operation it would be on a feature branch — no prompt.
+#     The tracked-but-ignored file is the security half of this: `git add -f`
+#     puts it in the index, its edits DO land on the branch, and `check-ignore`
+#     reports it as not-ignored precisely because it consults the index. That
+#     is what makes one probe sufficient, so pin it — a `--no-index` here would
+#     read the pattern alone and silently drop the guard on a tracked file.
+git -C "$WORK" checkout -q main
+check "edit gitignored path on main -> none" none \
+  "$(decision_for "$(edit_payload Write file_path "$WORK/tmp/scratch.json")" "$REPO_ROOT")"
+check "edit tracked-but-ignored path on main -> ask" ask \
+  "$(decision_for "$(edit_payload Edit file_path "$WORK/forced.txt")" "$REPO_ROOT")"
+#     The ignored path is also reached via a relative file_path + payload cwd,
+#     so the skip resolves the same path the branch check does.
+check "edit gitignored rel path on main -> none" none \
+  "$(decision_for "$(edit_payload Write file_path tmp/scratch.json "$WORK")" "$REPO_ROOT")"
+#     And it is a skip, not a blanket exemption: a non-ignored sibling in the
+#     same directory still asks.
+check "edit non-ignored path on main -> ask" ask \
+  "$(decision_for "$(edit_payload Edit file_path "$WORK/file.txt")" "$REPO_ROOT")"
+#     The skip must not fire where no human could answer it either way — an
+#     ignored path defers rather than denying under a non-interactive mode.
+check "[auto] edit gitignored path on main -> none" none \
+  "$(decision_for "$(edit_payload Write file_path "$WORK/tmp/scratch.json" "" auto)" "$REPO_ROOT")"
+
 git -C "$WORK" checkout -q claude/x
 
 # 6. unknown tool / missing file_path -> no decision

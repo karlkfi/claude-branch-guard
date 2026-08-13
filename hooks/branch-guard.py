@@ -41,7 +41,9 @@ An unquoted-delimiter body that the shell would expand (a command substitution
 in it runs) is kept in the stream so the substitution guard still defers.
 
 Also guards file edits (Edit/Write/MultiEdit/NotebookEdit) against the branch of
-the file's own repository, and `git push` according to BRANCH_GUARD_PUSH_POLICY.
+the file's own repository — except for a gitignored path, which holds no branch
+contents to protect (`path_is_ignored`) — and `git push` according to
+BRANCH_GUARD_PUSH_POLICY.
 The protected set is `main`/`master` plus any glob patterns in
 BRANCH_GUARD_PROTECTED_BRANCHES (see `protected_patterns`).
 
@@ -1214,6 +1216,23 @@ def tip_is_recoverable(cwd, name):
     return bool(r.stdout.strip())
 
 
+def path_is_ignored(repo_dir, path):
+    """True if <path> is gitignored, so an edit to it can't change what the
+    branch contains. False on every other answer — including every answer the
+    probe can't give (git unavailable, not a repo, a path outside the worktree,
+    pathspec magic git refuses) — so uncertainty keeps the protected-branch ask.
+
+    `git check-ignore` consults the INDEX by default: a tracked file that also
+    matches an ignore rule (someone `git add -f`'d it) reports NOT ignored, so
+    it keeps prompting — measured on git 2.55, and the reason `--no-index` must
+    never be added here. That flag reports the file as ignored purely on the
+    pattern, which would drop the guard on a file whose edits do land on the
+    branch.
+    """
+    r = run_git(repo_dir, 'check-ignore', '-q', '--', path)
+    return r is not None and r.returncode == 0
+
+
 def protected_patterns():
     """The protected-branch glob patterns: the built-in defaults plus each
     non-empty comma-separated entry of BRANCH_GUARD_PROTECTED_BRANCHES.
@@ -1357,10 +1376,17 @@ def main():
         # would land in the wrong repo and resolve the wrong branch.
         cwd = data.get('cwd') or os.getcwd()
         abs_path = file_path if os.path.isabs(file_path) else os.path.join(cwd, file_path)
-        branch = current_branch(os.path.dirname(abs_path) or cwd)
+        repo_dir = os.path.dirname(abs_path) or cwd
+        branch = current_branch(repo_dir)
         if branch is None:
             return
         if is_protected(branch):
+            # A gitignored path holds no branch contents, so the decision would
+            # be the same on `main` as on a feature branch and the prompt
+            # carries no signal. Probed only here, where the answer can change
+            # the outcome — a feature-branch edit still costs no subprocess.
+            if path_is_ignored(repo_dir, abs_path):
+                return
             confirm(f"Targets protected branch '{branch}'", mode)
         return
 
