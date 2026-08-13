@@ -827,8 +827,12 @@ def classify_git(sub, args, branch, policy):
             return ('allow', None)        # unambiguous branch create
         return ('defer', None)            # ambiguous (branch vs path discard) -> normal flow
     if sub == 'branch':
-        if short & {'d', 'D', 'm', 'M', 'f'} or flags & {'--delete', '--move', '--force'}:
+        if short & {'d', 'D', 'm', 'M'} or flags & {'--delete', '--move'}:
             return ('ask', "Deleting/renaming a git branch")
+        if 'f' in short or '--force' in flags:
+            # Creates when the name is free, force-moves the pointer when it
+            # isn't; the hook can't tell which without asking git.
+            return ('ask', "`git branch -f` can move an existing branch pointer")
         return ('allow', None)            # list or create
     if sub == 'tag':
         if 'd' in short or '--delete' in flags:

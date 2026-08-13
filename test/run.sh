@@ -426,6 +426,24 @@ check "git clean -fd -> ask" ask \
   "$(decision_for "$(bash_cmd 'git clean -fd')" "$WORK")"
 check "git branch -D -> ask" ask \
   "$(decision_for "$(bash_cmd 'git branch -D old')" "$WORK")"
+check "git branch -m rename -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -m old new')" "$WORK")"
+# `-f` neither deletes nor renames: it creates, or force-moves an existing
+# pointer. Same ask, but the reason has to say which.
+check "git branch -f -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -f backup old')" "$WORK")"
+branch_f_reason="$(reason_for "$(bash_cmd 'git branch -f backup old')" "$WORK")"
+check_text "git branch -f reason names the pointer move" has \
+  'can move an existing branch pointer' "$branch_f_reason"
+check_text "git branch -f reason does not claim a delete" lacks \
+  'Deleting/renaming' "$branch_f_reason"
+check_text "git branch -D reason still names the delete" has \
+  'Deleting/renaming a git branch' \
+  "$(reason_for "$(bash_cmd 'git branch -D old')" "$WORK")"
+# `-D` is `--delete --force` spelled long; the delete reason must win.
+check_text "git branch -d --force reason names the delete" has \
+  'Deleting/renaming a git branch' \
+  "$(reason_for "$(bash_cmd 'git branch -d --force old')" "$WORK")"
 check "git restore (worktree) -> ask" ask \
   "$(decision_for "$(bash_cmd 'git restore file.txt')" "$WORK")"
 check "git worktree remove -> ask" ask \
