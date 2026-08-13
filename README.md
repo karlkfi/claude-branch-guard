@@ -86,6 +86,7 @@ the default `strict` [push policy](#push-guard).
 | `git branch -f backup claude/x` *(the ref doesn't exist yet — a create)* | allow |
 | `git commit -m "fix"` *(on `main`)* | **ask** |
 | editing a file whose repo is on `main` *(Edit/Write/MultiEdit/NotebookEdit)* | **ask** |
+| editing a symlink in a gitignored dir that points at a tracked file, on `main` *(the write lands on branch contents)* | **ask** |
 | `git push origin main` / `git push origin HEAD:main` | **ask** |
 | `git push origin other-branch` *(strict policy)* | **ask** |
 | `git push origin v1.3.0` / `git push origin refs/tags/v1.3.0` / `git push --tags` *(publishes a tag, strict policy)* | **ask** |
@@ -268,7 +269,10 @@ its "yes, ignored" answer withdraws the prompt. Every other answer, including
 every answer it can't give (the path is outside the worktree, the repo won't
 open, git isn't available), leaves the **ask** in place. A file that matches an
 ignore rule but is *tracked* anyway (`git add -f`) still asks: `check-ignore`
-consults the index, and edits to that file really do land on the branch.
+consults the index, and edits to that file really do land on the branch. The
+probe follows symlinks and asks about the file the write lands on, so a link
+inside an ignored directory pointing at a tracked file still asks — a link to a
+genuinely ignored file stays exempt.
 
 ## Push guard
 

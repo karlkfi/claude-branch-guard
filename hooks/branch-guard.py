@@ -1217,10 +1217,17 @@ def tip_is_recoverable(cwd, name):
 
 
 def path_is_ignored(repo_dir, path):
-    """True if <path> is gitignored, so an edit to it can't change what the
-    branch contains. False on every other answer — including every answer the
-    probe can't give (git unavailable, not a repo, a path outside the worktree,
-    pathspec magic git refuses) — so uncertainty keeps the protected-branch ask.
+    """True if the file <path> writes to is gitignored, so an edit to it can't
+    change what the branch contains. False on every other answer — including
+    every answer the probe can't give (git unavailable, not a repo, a path
+    outside the worktree, pathspec magic git refuses) — so uncertainty keeps the
+    protected-branch ask.
+
+    Probes the REALPATH, not the path as given: a symlink inside an ignored
+    directory is itself ignored, but the write lands on its target, so probing
+    the link would exempt an edit to a tracked file. Resolving also fails in the
+    safe direction — a link out of the worktree reports not-ignored and keeps
+    the ask — and it normalizes `..` on the way.
 
     `git check-ignore` consults the INDEX by default: a tracked file that also
     matches an ignore rule (someone `git add -f`'d it) reports NOT ignored, so
@@ -1229,7 +1236,7 @@ def path_is_ignored(repo_dir, path):
     pattern, which would drop the guard on a file whose edits do land on the
     branch.
     """
-    r = run_git(repo_dir, 'check-ignore', '-q', '--', path)
+    r = run_git(repo_dir, 'check-ignore', '-q', '--', os.path.realpath(path))
     return r is not None and r.returncode == 0
 
 

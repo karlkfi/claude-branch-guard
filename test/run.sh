@@ -281,6 +281,28 @@ check "edit non-ignored path on main -> ask" ask \
 check "[auto] edit gitignored path on main -> none" none \
   "$(decision_for "$(edit_payload Write file_path "$WORK/tmp/scratch.json" "" auto)" "$REPO_ROOT")"
 
+# 5e. The probe must answer about the file the write LANDS on. A symlink inside
+#     an ignored dir is itself ignored, but its target need not be — so probing
+#     the link as given exempted an edit that really did change branch contents.
+#     Git Bash's `ln -s` copies the file unless Windows permits a real link, so
+#     assert against what the fixture actually is rather than the platform: with
+#     a copy there is no target to follow and the ignored-dir exemption holds.
+printf 'scratch\n' > "$WORK/tmp/scratch.json"
+ln -s ../file.txt "$WORK/tmp/to-tracked.txt" 2>/dev/null || true
+ln -s ./scratch.json "$WORK/tmp/to-ignored.json" 2>/dev/null || true
+if [[ -L "$WORK/tmp/to-tracked.txt" ]]; then
+  check "edit symlink in ignored dir -> tracked file on main -> ask" ask \
+    "$(decision_for "$(edit_payload Edit file_path "$WORK/tmp/to-tracked.txt")" "$REPO_ROOT")"
+else
+  check "edit copy in ignored dir (no symlink support) on main -> none" none \
+    "$(decision_for "$(edit_payload Edit file_path "$WORK/tmp/to-tracked.txt")" "$REPO_ROOT")"
+fi
+#     A link to a genuinely ignored file stays exempt, so the feature survives —
+#     and a copy of one is ignored too, which is why this expectation doesn't
+#     move with symlink support.
+check "edit symlink in ignored dir -> ignored file on main -> none" none \
+  "$(decision_for "$(edit_payload Write file_path "$WORK/tmp/to-ignored.json")" "$REPO_ROOT")"
+
 git -C "$WORK" checkout -q claude/x
 
 # 6. unknown tool / missing file_path -> no decision
