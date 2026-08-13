@@ -81,6 +81,9 @@ the default `strict` [push policy](#push-guard).
 | `git commit -F- <<'EOF' … EOF` *(feature branch; heredoc body is opaque data)* | allow |
 | `git fetch 2>/dev/null` / `git log >/dev/null 2>&1` *(discard redirect / fd-dup)* | allow |
 | `git pull --ff-only` | allow |
+| `git branch -d old` / `git branch -m old new` / `git branch -c old copy` *(git refuses the unsafe cases itself)* | allow |
+| `git branch -D old` *(tip survives on a remote-tracking branch or `main`)* | allow |
+| `git branch -f backup claude/x` *(the ref doesn't exist yet — a create)* | allow |
 | `git commit -m "fix"` *(on `main`)* | **ask** |
 | editing a file whose repo is on `main` *(Edit/Write/MultiEdit/NotebookEdit)* | **ask** |
 | `git push origin main` / `git push origin HEAD:main` | **ask** |
@@ -88,8 +91,9 @@ the default `strict` [push policy](#push-guard).
 | `git push origin v1.3.0` / `git push origin refs/tags/v1.3.0` / `git push --tags` *(publishes a tag, strict policy)* | **ask** |
 | `git reset --hard HEAD~1` | **ask** |
 | `git clean -fd` | **ask** |
-| `git branch -D old` / `git branch -m old new` | **ask** |
-| `git branch -f backup old` *(creates, or force-moves an existing pointer)* | **ask** |
+| `git branch -D old` *(tip reachable from nothing else — the commits would be orphaned)* | **ask** |
+| `git branch -D main` *(protected branch)* | **ask** |
+| `git branch -f old main` / `git branch -M x old` *(moves an existing branch off commits nothing else reaches)* | **ask** |
 | `gh pr merge 5 --delete-branch` / `gh pr close 5 -d` *(deletes the branch)* | **ask** |
 | `gh repo delete owner/repo` / `gh label delete bug` *(deletes a resource)* | **ask** |
 | `gh release delete v1` / `gh release delete-asset v1 file.zip` / `gh secret delete X` / `gh variable delete Y` / `gh gist delete abc` / `gh cache delete 1` *(deletes a resource; `secret`/`variable` also via the `remove` alias)* | **ask** |
@@ -133,6 +137,40 @@ file and keep allowing (`git fetch 2>/dev/null` stays auto-approved).
 switch branches or discard a file's changes — and the hook defers on ambiguity
 rather than guess. Only the unambiguous branch-create form (`git checkout -b`)
 auto-approves.
+
+### `git branch`: what the session owns, not how the verb looks
+
+`git branch` is the one subcommand judged by its **target** rather than by its
+verb. Deleting a scratch ref you created ten minutes ago and deleting a branch
+nobody else can recover are the same command, and gating both prompts constantly
+for the first while adding nothing to the second. So a target is auto-approved
+when it is both:
+
+- **recoverable** — its tip is reachable from a remote-tracking branch or from
+  local `main`/`master`, so the commits survive the branch and the worst case is
+  `git reset --hard <sha>`; and
+- **private** — not in the protected set. A protected branch is shared, so it
+  always asks.
+
+The non-force spellings need no check at all, because git already enforces the
+same one: `git branch -d` refuses to delete unmerged work, and `git branch -m`
+and `-c` refuse to overwrite an existing destination. Only the force spellings —
+`-D`, `-M`, `-C`, `-f`, and `-d --force` — can lose commits, so only those are
+checked against the target. `git branch -f backup claude/x` creating a new ref
+loses nothing and auto-approves; the same command pointed at a ref that already
+exists is judged on what that ref currently points at.
+
+The check runs two local `git` queries and never touches the network. It can
+only ever turn a prompt into an approval, and only on a positive answer — if git
+can't be reached, the branch won't resolve, or a `git -C`/`--git-dir` option
+points the command at a different repository than the one the queries read, the
+command asks exactly as it did before.
+
+One caveat worth knowing: "reachable from a remote-tracking branch" trusts your
+last `git fetch`. A stale `refs/remotes/origin/x` left behind after the branch
+was deleted on the remote still reads as recoverable. Like the rest of the hook
+this is best-effort friction reduction, not a guarantee — see
+[Limitations](#limitations).
 
 One narrow relaxation of the all-segments rule covers a constant AI-agent habit:
 piping read-only git/gh output through a pager. A trailing segment also counts as
@@ -560,6 +598,13 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   classified (it asks/defers rather than allowing). Auto-approval is a
   convenience layer, not a security boundary — for hard guarantees use a git
   `pre-push` hook and/or server-side branch protection.
+- The [`git branch` recoverability check](#git-branch-what-the-session-owns-not-how-the-verb-looks)
+  reads local refs only, so it trusts your last `git fetch`. A remote-tracking
+  ref left stale after the branch was deleted upstream still counts as
+  recoverable, and a branch pushed since the last fetch may not. It also has no
+  notion of a branch being shared beyond the protected set — a branch with an
+  open PR is not treated as shared, though deleting it locally leaves both the
+  remote branch and the PR intact.
 
 ## Companion plugin
 

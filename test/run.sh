@@ -426,23 +426,22 @@ check "git clean -fd -> ask" ask \
   "$(decision_for "$(bash_cmd 'git clean -fd')" "$WORK")"
 check "git branch -D -> ask" ask \
   "$(decision_for "$(bash_cmd 'git branch -D old')" "$WORK")"
-check "git branch -m rename -> ask" ask \
+# A non-force rename can't lose commits -- git refuses to clobber an existing
+# destination itself -- so it is auto-approved rather than prompted.
+check "git branch -m rename -> allow" allow \
   "$(decision_for "$(bash_cmd 'git branch -m old new')" "$WORK")"
 # `-f` neither deletes nor renames: it creates, or force-moves an existing
-# pointer. Same ask, but the reason has to say which.
-check "git branch -f -> ask" ask \
+# pointer. Creating a name nothing holds loses nothing, so it allows.
+check "git branch -f creating a free name -> allow" allow \
   "$(decision_for "$(bash_cmd 'git branch -f backup old')" "$WORK")"
-branch_f_reason="$(reason_for "$(bash_cmd 'git branch -f backup old')" "$WORK")"
-check_text "git branch -f reason names the pointer move" has \
-  'can move an existing branch pointer' "$branch_f_reason"
-check_text "git branch -f reason does not claim a delete" lacks \
-  'Deleting/renaming' "$branch_f_reason"
-check_text "git branch -D reason still names the delete" has \
-  'Deleting/renaming a git branch' \
-  "$(reason_for "$(bash_cmd 'git branch -D old')" "$WORK")"
+branch_D_reason="$(reason_for "$(bash_cmd 'git branch -D old')" "$WORK")"
+check_text "git branch -D reason names the delete" has \
+  'force-deletes' "$branch_D_reason"
+check_text "git branch -D reason does not claim a rename" lacks \
+  'Deleting/renaming' "$branch_D_reason"
 # `-D` is `--delete --force` spelled long; the delete reason must win.
 check_text "git branch -d --force reason names the delete" has \
-  'Deleting/renaming a git branch' \
+  'force-deletes' \
   "$(reason_for "$(bash_cmd 'git branch -d --force old')" "$WORK")"
 check "git restore (worktree) -> ask" ask \
   "$(decision_for "$(bash_cmd 'git restore file.txt')" "$WORK")"
@@ -806,6 +805,107 @@ git -C "$WORK" checkout -q main
 check "commit + heredoc on main -> ask" ask \
   "$(decision_for "$(bash_payload "$(printf 'git commit -F- <<'"'"'EOF'"'"'\nmsg\nEOF')")" "$WORK")"
 git -C "$WORK" checkout -q claude/x
+
+# 24. `git branch` scoped to what the session owns, not to the verb. A target is
+#     in bounds when it is recoverable (tip reachable from a remote-tracking ref
+#     or main) and private (not protected). The probes can only ever relax a
+#     would-be `ask` into an `allow`, so every case they can't answer for --
+#     a branch that doesn't exist, a foreign repo -- keeps asking.
+#
+#     Fixture branches: `merged` sits at main's tip (recoverable via
+#     refs/heads/main); `orphan` carries a commit reachable from nothing else.
+git -C "$WORK" branch merged
+git -C "$WORK" checkout -q -b orphan
+git -C "$WORK" commit -q --allow-empty -m "unreachable work"
+git -C "$WORK" checkout -q claude/x
+
+#     `pushed` carries a commit main can't reach, recoverable only because a
+#     remote-tracking ref holds it — the case the whole model turns on, and the
+#     one a repo with no remote would otherwise never exercise.
+git -C "$WORK" checkout -q -b pushed
+git -C "$WORK" commit -q --allow-empty -m "work that survives on the remote"
+git -C "$WORK" update-ref refs/remotes/origin/pushed \
+  "$(git -C "$WORK" rev-parse pushed)"
+git -C "$WORK" checkout -q claude/x
+
+#     Non-force spellings need no probe: git enforces the same check itself.
+check "git branch -d (git refuses unmerged) -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -d merged')" "$WORK")"
+check "git branch -d on an unmerged branch -> allow (git refuses it)" allow \
+  "$(decision_for "$(bash_cmd 'git branch -d orphan')" "$WORK")"
+check "git branch -m rename -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -m orphan renamed')" "$WORK")"
+check "git branch -c copy -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -c orphan copy')" "$WORK")"
+
+#     Force delete: recoverable target allows, orphaning target asks.
+check "git branch -D recoverable -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -D merged')" "$WORK")"
+check "git branch -D irrecoverable -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -D orphan')" "$WORK")"
+check "git branch -D of several, one irrecoverable -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -D merged orphan')" "$WORK")"
+check "git branch -D protected -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -D main')" "$WORK")"
+#     Unreachable from main, but the remote still has it.
+check "git branch -D recoverable via remote-tracking ref -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -D pushed')" "$WORK")"
+#     `-r` deletes the local cache of a remote ref; a fetch restores it.
+check "git branch -rD remote-tracking ref -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -rD origin/pushed')" "$WORK")"
+#     `-d --force` is `-D` spelled long, so force must be read from the whole
+#     flag set -- reading only the letter `d` would auto-approve a real delete.
+check "git branch -d --force irrecoverable -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -d --force orphan')" "$WORK")"
+check "git branch --delete --force recoverable -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch --delete --force merged')" "$WORK")"
+
+#     Force move/copy: creating a new ref loses nothing; moving an existing one
+#     depends on whether its CURRENT tip survives elsewhere.
+check "git branch -f creating a backup ref -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -f backup claude/x')" "$WORK")"
+check "git branch -f onto a recoverable branch -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -f merged main')" "$WORK")"
+check "git branch -f onto an irrecoverable branch -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -f orphan main')" "$WORK")"
+check "git branch -f protected -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -f main claude/x')" "$WORK")"
+check "git branch -M onto a new name -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -M merged brand-new')" "$WORK")"
+check "git branch -M onto an irrecoverable branch -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -M merged orphan')" "$WORK")"
+check "git branch -m from protected -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -m main renamed')" "$WORK")"
+check "git branch -C onto an irrecoverable branch -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -C merged orphan')" "$WORK")"
+
+#     Unprovable cases keep today's `ask`: a branch that doesn't exist can't be
+#     shown recoverable, and a `-C` global points the command at another repo
+#     than the one the probes read.
+check "git branch -D nonexistent -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -D no-such-branch')" "$WORK")"
+check "git -C other-repo branch -D -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git -C /somewhere/else branch -D merged')" "$WORK")"
+
+#     Listing is untouched, and the unattended fail-safe still applies.
+check "git branch --list -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -a -v')" "$WORK")"
+check "[auto] git branch -D irrecoverable -> deny" deny \
+  "$(decision_for "$(push_mode 'git branch -D orphan' 'auto')" "$WORK")"
+
+#     Wording: the reason has to say what is actually happening. `git branch -f`
+#     creating a ref was reported as "Deleting/renaming a git branch", which is
+#     the opposite of the truth and invites approving for the wrong reason.
+branch_reason="$(reason_for "$(bash_cmd 'git branch -f orphan main')" "$WORK")"
+check_text "branch -f reason names the move, not a delete" has \
+  "moves existing branch 'orphan'" "$branch_reason"
+check_text "branch -f reason drops the old delete/rename wording" lacks \
+  "Deleting/renaming" "$branch_reason"
+check_text "branch -f ask still invites a confirmation" has \
+  "confirm before proceeding" "$branch_reason"
+del_reason="$(reason_for "$(bash_cmd 'git branch -D orphan')" "$WORK")"
+check_text "branch -D reason says why it isn't recoverable" has \
+  "isn't reachable from any remote-tracking branch or main" "$del_reason"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 

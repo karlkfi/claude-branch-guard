@@ -8,8 +8,19 @@ For Bash `git`/`gh` commands it emits a per-command decision:
   allow  — safe to auto-approve (read-only git/gh, staging, branch creation,
            fetch, a commit/push of a feature/worktree branch, …);
   ask    — confirm first (commit/edit/push to a protected branch, or a
-           destructive command like `reset --hard`, `clean -f`, `branch -D`);
+           destructive command like `reset --hard`, `clean -f`);
   (none) — defer: emit nothing, so the normal permission flow applies.
+
+`git branch` is classified by what the session OWNS rather than by how
+destructive the verb looks (`classify_branch`). A target is in bounds when it is
+recoverable — its tip is reachable from a remote-tracking ref or a local
+integration branch (RECOVERY_REF_PATTERNS), so the worst case is a
+`git reset --hard <sha>` — and private, meaning not in the protected set. This
+only ever relaxes a would-be `ask` into an `allow`, and only on proof from a
+local git query: a foreign repo (`git -C`), an unreachable git, or a branch that
+won't resolve all keep asking. The non-force spellings need no query, because
+git already enforces the same check (`-d` refuses unmerged work; `-m`/`-c`
+refuse an existing destination), so only `-D`/`-M`/`-C`/`-f` are probed.
 
 A command is auto-approved only when EVERY segment in it is recognized-safe — a
 git/gh invocation classified `allow`, a read-only pager piped after one
@@ -95,6 +106,20 @@ GH_VALUE_OPTS = {'-R', '--repo'}
 # inline config (`git -c core.pager='!sh -c …' log`). Their presence blocks
 # auto-allow (the command defers) but never suppresses an `ask`.
 GIT_ESCAPE_HATCHES = {'-c', '--config-env'}
+
+# git global options that point the command at a DIFFERENT repository than the
+# session's. The ref probes below run against the session cwd, so their answers
+# would be about the wrong repo — their presence disables probing and the gated
+# `git branch` forms keep their unprobed `ask`.
+REPO_REDIRECT_OPTS = ('-C', '--git-dir', '--work-tree')
+
+# Refs whose reachability makes a branch tip RECOVERABLE: any remote-tracking
+# branch, or a local integration branch. If one of these contains the tip, the
+# commits survive the branch being deleted or force-moved and the worst case is
+# a `git reset --hard <sha>` — so the operation is in bounds for the session
+# that owns the ref. A pattern matching nothing is silently ignored by
+# for-each-ref, so listing `master` in a `main`-only repo is harmless.
+RECOVERY_REF_PATTERNS = ('refs/remotes', 'refs/heads/main', 'refs/heads/master')
 
 # Read-only git subcommands — auto-allowed on any branch.
 READONLY_GIT = frozenset({
@@ -791,7 +816,117 @@ def short_flag_letters(args):
     return letters
 
 
-def classify_git(sub, args, branch, policy):
+def overwrite_verdict(cwd, name, what, probe):
+    """Verdict for a `git branch` form that would overwrite branch <name>'s
+    current tip. Creating a ref that doesn't exist yet loses nothing; moving one
+    whose tip survives on a remote-tracking ref or main costs a
+    `git reset --hard <sha>`. Everything else — including every case the probes
+    can't answer — keeps the `ask`."""
+    if not probe:
+        return ('ask', f"{what} can move an existing branch pointer, and a "
+                       f"`git -C`/`--git-dir` option points at another "
+                       f"repository, so branch-guard can't check what "
+                       f"'{name}' currently points at")
+    exists = branch_exists(cwd, name)
+    if exists is False:
+        return ('allow', None)        # creates a new ref — nothing to overwrite
+    if exists is None:
+        return ('ask', f"{what} can move an existing branch pointer, and "
+                       f"branch-guard couldn't resolve '{name}'")
+    rec = tip_is_recoverable(cwd, name)
+    if rec is True:
+        return ('allow', None)
+    if rec is False:
+        return ('ask', f"{what} moves existing branch '{name}', whose current "
+                       f"tip isn't reachable from any remote-tracking branch "
+                       f"or main")
+    return ('ask', f"{what} moves existing branch '{name}', and branch-guard "
+                   f"couldn't check whether its current tip survives elsewhere")
+
+
+def classify_branch(flags, short, pos, current, cwd, probe):
+    """Verdict for `git branch`, scoped to what the session owns rather than to
+    the verb. A target is in bounds when it is *recoverable* — its tip survives
+    on a remote-tracking ref or main, so the worst case is a
+    `git reset --hard <sha>` — and *private*, meaning not in the protected set.
+    A protected branch is shared, so it always asks.
+
+    This can only ever relax a would-be `ask` into an `allow`, and only on
+    proof: every form the probes can't answer for keeps asking, so an
+    unreachable git, a foreign repo, or a branch that doesn't exist all land on
+    today's behavior rather than a new approval.
+
+    The non-force spellings need no probe at all, because git already enforces
+    the check the guard would duplicate: `-d` refuses to delete unmerged work,
+    and `-m`/`-c` refuse to clobber an existing destination. Only the force
+    spellings can lose commits. `-D`, `-M`, and `-C` are the force forms of
+    `--delete`, `--move`, and `--copy`, and `-d --force` is `-D` spelled long —
+    so force is read from the whole flag set, never from one letter."""
+    force = 'f' in short or '--force' in flags or bool(short & {'D', 'M', 'C'})
+    delete = bool(short & {'d', 'D'}) or '--delete' in flags
+    move = bool(short & {'m', 'M'}) or '--move' in flags
+    copy = bool(short & {'c', 'C'}) or '--copy' in flags
+
+    if delete:
+        if not force:
+            return ('allow', None)    # git itself refuses to drop unmerged work
+        if not pos:
+            return ('ask', "`git branch --delete --force` names no branch")
+        for b in pos:
+            if is_protected(b):
+                return ('ask', f"Deleting protected branch '{b}'")
+        if not probe:
+            return ('ask', "`git branch -D` force-deletes a branch, and a "
+                           "`git -C`/`--git-dir` option points at another "
+                           "repository, so branch-guard can't check whether "
+                           "the commits survive elsewhere")
+        # `-r` deletes a remote-tracking ref (`git branch -rD origin/x`). Such a
+        # target sits under refs/remotes, so it satisfies the reachability check
+        # by containing itself — which is the right answer for the right reason:
+        # the ref is a local cache of the remote and `git fetch` restores it.
+        for b in pos:
+            rec = tip_is_recoverable(cwd, b)
+            if rec is True:
+                continue
+            if rec is False:
+                return ('ask', f"`git branch -D` force-deletes '{b}', whose "
+                               f"tip isn't reachable from any remote-tracking "
+                               f"branch or main")
+            return ('ask', f"`git branch -D` force-deletes '{b}', and "
+                           f"branch-guard couldn't check whether its commits "
+                           f"survive elsewhere")
+        return ('allow', None)
+
+    if move or copy:
+        # `-m <new>` renames the current branch; `-m <old> <new>` names both.
+        # A copy leaves its source alone, so only a rename can strand one.
+        dst = pos[-1] if pos else None
+        src = pos[0] if len(pos) > 1 else (None if copy else current)
+        if dst is None:
+            return ('ask', "`git branch --move`/`--copy` names no branch")
+        if move and src is not None and is_protected(src):
+            return ('ask', f"Renaming protected branch '{src}'")
+        if is_protected(dst):
+            verb = 'Copying' if copy else 'Renaming'
+            return ('ask', f"{verb} a branch onto protected branch '{dst}'")
+        if not force:
+            return ('allow', None)    # git itself refuses an existing dest
+        return overwrite_verdict(cwd, dst, '`git branch -M`' if move
+                                 else '`git branch -C`', probe)
+
+    if force:
+        # `git branch -f <name> [<start>]`: creates <name>, or force-moves it.
+        dst = pos[0] if pos else None
+        if dst is None:
+            return ('ask', "`git branch --force` names no branch")
+        if is_protected(dst):
+            return ('ask', f"`git branch -f` moves protected branch '{dst}'")
+        return overwrite_verdict(cwd, dst, '`git branch -f`', probe)
+
+    return ('allow', None)            # list or create
+
+
+def classify_git(sub, args, branch, policy, cwd, probe):
     """Verdict ('allow' | 'ask' | 'defer', reason) for a `git <sub>` command."""
     flags = {a for a in args if a.startswith('-')}
     short = short_flag_letters(args)
@@ -827,13 +962,7 @@ def classify_git(sub, args, branch, policy):
             return ('allow', None)        # unambiguous branch create
         return ('defer', None)            # ambiguous (branch vs path discard) -> normal flow
     if sub == 'branch':
-        if short & {'d', 'D', 'm', 'M'} or flags & {'--delete', '--move'}:
-            return ('ask', "Deleting/renaming a git branch")
-        if 'f' in short or '--force' in flags:
-            # Creates when the name is free, force-moves the pointer when it
-            # isn't; the hook can't tell which without asking git.
-            return ('ask', "`git branch -f` can move an existing branch pointer")
-        return ('allow', None)            # list or create
+        return classify_branch(flags, short, pos, branch, cwd, probe)
     if sub == 'tag':
         if 'd' in short or '--delete' in flags:
             return ('ask', "Deleting a git tag")
@@ -978,7 +1107,16 @@ def classify_gh(sub, args):
     return ('defer', None)
 
 
-def classify_segment(inv, branch, policy):
+def targets_other_repo(globals_):
+    """True if a git invocation's global options point it at a repository other
+    than the session's (`-C path`, `--git-dir=…`, `--work-tree=…`, in attached
+    or separate-token form). The ref probes run against the session cwd, so
+    their answers wouldn't be about the repo the command acts on."""
+    return any(g == o or g.startswith(o + '=')
+               for g in globals_ for o in REPO_REDIRECT_OPTS)
+
+
+def classify_segment(inv, branch, policy, cwd):
     """Verdict ('nongit' | 'allow' | 'ask' | 'defer', reason) for one segment.
     'nongit' marks a segment that isn't a git/gh invocation (so the whole
     command can't be auto-approved)."""
@@ -988,12 +1126,26 @@ def classify_segment(inv, branch, policy):
         return classify_gh(inv['sub'] or '', inv['args'])
     if inv['sub'] is None:
         return ('defer', None)            # bare `git`
-    verdict, reason = classify_git(inv['sub'], inv['args'], branch, policy)
+    verdict, reason = classify_git(inv['sub'], inv['args'], branch, policy,
+                                   cwd, not targets_other_repo(inv['globals']))
     # An inline-config escape hatch blocks auto-allow, but must not weaken a
     # protective `ask` (e.g. `git -c k=v commit` on main still asks).
     if verdict == 'allow' and (set(inv['globals']) & GIT_ESCAPE_HATCHES):
         return ('defer', None)
     return (verdict, reason)
+
+
+def run_git(cwd, *args):
+    """Run `git -C <cwd> <args>` and return the CompletedProcess, or None when
+    git can't be run at all (missing binary, timeout). The 5s cap keeps a wedged
+    repo or stuck git from blocking the hook until Claude Code's 10s hook
+    timeout fires, degrading every tool call — a None answer makes every caller
+    fail safe."""
+    try:
+        return subprocess.run(['git', '-C', cwd] + list(args),
+                              capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
 
 
 def current_branch(cwd):
@@ -1002,19 +1154,38 @@ def current_branch(cwd):
     git hangs. Unlike `rev-parse --abbrev-ref HEAD` (which prints the literal
     "HEAD" and exits 0 on a detached HEAD), `symbolic-ref -q` exits non-zero
     when HEAD is detached, so a detached HEAD resolves to None and the hook
-    defers. The 5s timeout keeps a wedged repo or stuck git from blocking the
-    hook until Claude Code's 10s hook timeout fires, degrading every tool call —
-    on timeout we defer (fail safe) like any other unresolvable branch."""
-    try:
-        r = subprocess.run(
-            ['git', '-C', cwd, 'symbolic-ref', '--short', '-q', 'HEAD'],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if r.returncode != 0:
+    defers (fail safe) like any other unresolvable branch."""
+    r = run_git(cwd, 'symbolic-ref', '--short', '-q', 'HEAD')
+    if r is None or r.returncode != 0:
         return None
     return r.stdout.strip() or None
+
+
+def branch_exists(cwd, name):
+    """True/False if local branch <name> does/doesn't exist; None when the query
+    can't answer (git unavailable, not a repo, malformed ref name). Callers must
+    treat None as "unknown" and keep asking — never as "safe to overwrite"."""
+    r = run_git(cwd, 'show-ref', '--verify', '--quiet', 'refs/heads/' + name)
+    if r is None:
+        return None
+    if r.returncode == 0:
+        return True
+    if r.returncode == 1:
+        return False
+    return None                       # 128: malformed ref name, or not a repo
+
+
+def tip_is_recoverable(cwd, name):
+    """True if branch <name>'s tip is reachable from one of
+    RECOVERY_REF_PATTERNS, so deleting or force-moving the branch orphans
+    nothing. False when provably not reachable; None when the query can't answer
+    — a branch that doesn't exist makes `--contains` fail (exit 129), which is
+    "unknown", not "recoverable"."""
+    r = run_git(cwd, 'for-each-ref', '--contains', name,
+                '--format=%(refname)', *RECOVERY_REF_PATTERNS)
+    if r is None or r.returncode != 0:
+        return None
+    return bool(r.stdout.strip())
 
 
 def is_protected(branch):
@@ -1080,7 +1251,8 @@ def main():
             return                                 # no git/gh command -> defer
 
         policy = push_policy()
-        branch = current_branch(data.get('cwd') or os.getcwd())
+        cwd = data.get('cwd') or os.getcwd()
+        branch = current_branch(cwd)
         verdicts = []
         for (seg, writes), inv in zip(segments, invs):
             if inv is None:
@@ -1100,7 +1272,7 @@ def main():
                 else:
                     verdicts.append(('nongit', None))
             else:
-                verdict, reason = classify_segment(inv, branch, policy)
+                verdict, reason = classify_segment(inv, branch, policy, cwd)
                 # An output redirect to a file is a write side-effect the
                 # classifier can't see (`git log --format=… > f` writes
                 # possibly-attacker-influenced content). Downgrade a would-be
