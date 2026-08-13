@@ -884,6 +884,11 @@ check "git branch --delete protected -> ask" ask \
   "$(decision_for "$(bash_cmd 'git branch --delete main')" "$WORK")"
 #     Same for a branch protected only by configuration -- otherwise the
 #     BRANCH_GUARD_PROTECTED_BRANCHES set is bypassable by lowercasing a flag.
+#     The unset control is what makes the pair mean anything: without it the
+#     `ask` below could come from anywhere, and a `-d` that asked unconditionally
+#     would pass too.
+check "[unset] git branch -d release/1.2 -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -d release/1.2')" "$WORK")"
 check "[configured] git branch -d release/1.2 -> ask" ask \
   "$(decision_for "$(bash_cmd 'git branch -d release/1.2')" "$WORK" \
      'BRANCH_GUARD_PROTECTED_BRANCHES=release/*')"
