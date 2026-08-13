@@ -81,7 +81,7 @@ the default `strict` [push policy](#push-guard).
 | `git commit -F- <<'EOF' … EOF` *(feature branch; heredoc body is opaque data)* | allow |
 | `git fetch 2>/dev/null` / `git log >/dev/null 2>&1` *(discard redirect / fd-dup)* | allow |
 | `git pull --ff-only` | allow |
-| `git branch -d old` / `git branch -m old new` / `git branch -c old copy` *(git refuses the unsafe cases itself)* | allow |
+| `git branch -d old` / `git branch -m old new` / `git branch -c old copy` *(unprotected target; git refuses the unsafe cases itself)* | allow |
 | `git branch -D old` *(tip survives on a remote-tracking branch or `main`)* | allow |
 | `git branch -f backup claude/x` *(the ref doesn't exist yet — a create)* | allow |
 | `git commit -m "fix"` *(on `main`)* | **ask** |
@@ -92,7 +92,7 @@ the default `strict` [push policy](#push-guard).
 | `git reset --hard HEAD~1` | **ask** |
 | `git clean -fd` | **ask** |
 | `git branch -D old` *(tip reachable from nothing else — the commits would be orphaned)* | **ask** |
-| `git branch -D main` *(protected branch)* | **ask** |
+| `git branch -d main` / `git branch -D main` / `git branch -m x main` *(protected branch, any spelling)* | **ask** |
 | `git branch -f old main` / `git branch -M x old` *(moves an existing branch off commits nothing else reaches)* | **ask** |
 | `gh pr merge 5 --delete-branch` / `gh pr close 5 -d` *(deletes the branch)* | **ask** |
 | `gh repo delete owner/repo` / `gh label delete bug` *(deletes a resource)* | **ask** |
@@ -152,11 +152,15 @@ when it is both:
 - **private** — not in the protected set. A protected branch is shared, so it
   always asks.
 
-The non-force spellings need no check at all, because git already enforces the
-same one: `git branch -d` refuses to delete unmerged work, and `git branch -m`
-and `-c` refuse to overwrite an existing destination. Only the force spellings —
-`-D`, `-M`, `-C`, `-f`, and `-d --force` — can lose commits, so only those are
-checked against the target. `git branch -f backup claude/x` creating a new ref
+These are independent questions, and the protected one is asked first for every
+spelling. The non-force spellings need no *recoverability* check, because git
+already enforces that one itself: `git branch -d` refuses to delete unmerged
+work, and `git branch -m` and `-c` refuse to overwrite an existing destination.
+Only the force spellings — `-D`, `-M`, `-C`, `-f`, and `-d --force` — can lose
+commits, so only those are checked for recoverability. But git has no notion of
+which branches you consider shared, so `git branch -d main` prompts exactly like
+`git branch -D main`, as does any branch matching
+[`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration). `git branch -f backup claude/x` creating a new ref
 loses nothing and auto-approves; the same command pointed at a ref that already
 exists is judged on what that ref currently points at.
 

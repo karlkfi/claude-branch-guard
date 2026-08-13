@@ -838,6 +838,25 @@ check "git branch -d (git refuses unmerged) -> allow" allow \
   "$(decision_for "$(bash_cmd 'git branch -d merged')" "$WORK")"
 check "git branch -d on an unmerged branch -> allow (git refuses it)" allow \
   "$(decision_for "$(bash_cmd 'git branch -d orphan')" "$WORK")"
+
+#     Shared and recoverable are INDEPENDENT questions, and git only enforces
+#     the second one. `-d` can't orphan commits, but it still drops the local
+#     ref, so a protected target asks either way. This crossing -- a non-force
+#     spelling against a protected branch -- is the gap that let `git branch -d
+#     main` auto-approve: every protected assertion used a force spelling, and
+#     every non-force case named an unprotected branch.
+check "git branch -d protected -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -d main')" "$WORK")"
+check "git branch --delete protected -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch --delete main')" "$WORK")"
+#     Same for a branch protected only by configuration -- otherwise the
+#     BRANCH_GUARD_PROTECTED_BRANCHES set is bypassable by lowercasing a flag.
+check "[configured] git branch -d release/1.2 -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -d release/1.2')" "$WORK" \
+     'BRANCH_GUARD_PROTECTED_BRANCHES=release/*')"
+#     The same crossing on the rename path, which already ordered it correctly.
+check "git branch -m onto protected (non-force) -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -m merged main')" "$WORK")"
 check "git branch -m rename -> allow" allow \
   "$(decision_for "$(bash_cmd 'git branch -m orphan renamed')" "$WORK")"
 check "git branch -c copy -> allow" allow \

@@ -876,20 +876,31 @@ def classify_branch(flags, short, pos, current, cwd, probe):
     and `-m`/`-c` refuse to clobber an existing destination. Only the force
     spellings can lose commits. `-D`, `-M`, and `-C` are the force forms of
     `--delete`, `--move`, and `--copy`, and `-d --force` is `-D` spelled long —
-    so force is read from the whole flag set, never from one letter."""
+    so force is read from the whole flag set, never from one letter.
+
+    Every branch here answers *shared* before it answers *recoverable*. Those
+    are independent questions and git only ever enforces the second one, so an
+    early return that proves a target recoverable and stops has silently
+    answered "not shared" without asking. That ordering mistake is what made
+    `git branch -d main` auto-approve."""
     force = 'f' in short or '--force' in flags or bool(short & {'D', 'M', 'C'})
     delete = bool(short & {'d', 'D'}) or '--delete' in flags
     move = bool(short & {'m', 'M'}) or '--move' in flags
     copy = bool(short & {'c', 'C'}) or '--copy' in flags
 
     if delete:
+        # Shared before recoverable: `-d` can't orphan commits, but it still
+        # drops the local ref, so a protected target asks whether or not git
+        # would allow the delete. Checking recoverability first and returning
+        # would skip the question that matters here (see move/copy below, which
+        # order it the same way).
+        for b in pos:
+            if is_protected(b):
+                return ('ask', f"Deleting protected branch '{b}'")
         if not force:
             return ('allow', None)    # git itself refuses to drop unmerged work
         if not pos:
             return ('ask', "`git branch --delete --force` names no branch")
-        for b in pos:
-            if is_protected(b):
-                return ('ask', f"Deleting protected branch '{b}'")
         if not probe:
             return ('ask', "`git branch -D` force-deletes a branch, and a "
                            "`git -C`/`--git-dir` option points at another "
