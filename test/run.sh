@@ -589,6 +589,25 @@ check "git config --global -> ask" ask \
   "$(decision_for "$(bash_cmd 'git config --global user.name x')" "$WORK")"
 check "git stash drop -> ask" ask \
   "$(decision_for "$(bash_cmd 'git stash drop')" "$WORK")"
+#     Stashing adds no commit and rewrites no history, so the branch a session
+#     sits on is the wrong question for it -- and it is recoverable by
+#     construction, which is the whole point. Only the forms that discard a
+#     stash are gated. Nothing crossed stash against a protected branch before,
+#     which is how the wrong axis went unnoticed.
+check "git stash -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git stash')" "$WORK")"
+check "git stash pop -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git stash pop')" "$WORK")"
+check "git stash branch (unlisted form) -> none (defer)" none \
+  "$(decision_for "$(bash_cmd 'git stash branch recovered')" "$WORK")"
+git -C "$WORK" checkout -q main
+check "git stash on main -> allow (touches no branch history)" allow \
+  "$(decision_for "$(bash_cmd 'git stash')" "$WORK")"
+check "git stash pop on main -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git stash pop')" "$WORK")"
+check "git stash drop on main -> ask (still discards a stash)" ask \
+  "$(decision_for "$(bash_cmd 'git stash drop')" "$WORK")"
+git -C "$WORK" checkout -q claude/x
 check "readonly + destructive chain -> ask" ask \
   "$(decision_for "$(bash_cmd 'git status && git clean -fd')" "$WORK")"
 check "[auto] git clean -fd -> deny" deny \

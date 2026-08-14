@@ -1058,11 +1058,18 @@ def classify_git(sub, args, branch, policy, cwd, probe):
             return ('ask', "Removing/moving a git worktree")
         return ('defer', None)
     if sub == 'stash':
-        if first in ('list', 'show'):
-            return ('allow', None)
         if first in ('drop', 'clear'):
             return ('ask', "Dropping stashed changes")
-        return _feature(branch, "Stash operation on a protected branch")
+        # Stashing adds no commit and rewrites no history — it moves worktree
+        # changes into `refs/stash` — so the protected branch a session happens
+        # to be on is the wrong question to ask about it. On the other axis it's
+        # recoverable by construction: keeping the changes retrievable is the
+        # entire point, which is why only `drop`/`clear` (the forms that discard
+        # a stash) are gated. Listed explicitly rather than allowed by default,
+        # so a future subcommand defers instead of inheriting an allow.
+        if first in ('', 'push', 'save', 'list', 'show', 'apply', 'pop'):
+            return ('allow', None)
+        return ('defer', None)
     if sub in ('merge', 'cherry-pick', 'revert', 'am'):
         if flags & {'--abort', '--continue', '--skip', '--quit'}:
             return ('allow', None)        # control ops are safe
