@@ -914,9 +914,19 @@ check "[unset] git branch -d release/1.2 -> allow" allow \
 check "[configured] git branch -d release/1.2 -> ask" ask \
   "$(decision_for "$(bash_cmd 'git branch -d release/1.2')" "$WORK" \
      'BRANCH_GUARD_PROTECTED_BRANCHES=release/*')"
-#     The same crossing on the rename path, which already ordered it correctly.
+#     The same crossing on every remaining verb. `-d`/`-D`/`-m`/`-f` had it;
+#     `-M`, `-c`, and `-C` did not, so three of the seven forms that can name a
+#     protected target were asserted nowhere. One shared check covers them all
+#     now, and these pin that it does -- a per-verb check is what let the
+#     orderings drift apart in the first place.
 check "git branch -m onto protected (non-force) -> ask" ask \
   "$(decision_for "$(bash_cmd 'git branch -m merged main')" "$WORK")"
+check "git branch -M onto protected (force move) -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -M merged main')" "$WORK")"
+check "git branch -c onto protected (copy) -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -c merged main')" "$WORK")"
+check "git branch -C onto protected (force copy) -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -C merged main')" "$WORK")"
 check "git branch -m rename -> allow" allow \
   "$(decision_for "$(bash_cmd 'git branch -m orphan renamed')" "$WORK")"
 check "git branch -c copy -> allow" allow \

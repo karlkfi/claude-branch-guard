@@ -861,6 +861,41 @@ def overwrite_verdict(cwd, name, what, probe):
                    f"couldn't check whether its current tip survives elsewhere")
 
 
+def protected_targets(delete, move, copy, force, pos, current):
+    """Every ref a `git branch` form would remove, rename, or overwrite, each
+    paired with the phrase describing what happens to it. Returned as one list
+    so a SINGLE protected check can cover every form.
+
+    Shared and recoverable are independent questions, and git only enforces the
+    second — it has no notion of which branches you treat as shared. While each
+    verb branch made the protected check for itself, three of them made it
+    before their allow-return and one made it after, which is how
+    `git branch -d main` came to auto-approve. Answering it here, once, ahead
+    of the dispatch is what makes that ordering unrepresentable rather than
+    merely correct today.
+
+    A plain create (`git branch new start`) overwrites nothing, so it has no
+    targets."""
+    if delete:
+        return [(b, f"Deleting protected branch '{b}'") for b in pos]
+    if move or copy:
+        # `-m <new>` renames the current branch; `-m <old> <new>` names both.
+        # A copy leaves its source alone, so only a rename can strand one.
+        dst = pos[-1] if pos else None
+        src = pos[0] if len(pos) > 1 else (None if copy else current)
+        targets = []
+        if move and src is not None:
+            targets.append((src, f"Renaming protected branch '{src}'"))
+        if dst is not None:
+            verb = 'Copying' if copy else 'Renaming'
+            targets.append((dst, f"{verb} a branch onto protected branch '{dst}'"))
+        return targets
+    if force and pos:
+        # `git branch -f <name> [<start>]`: creates <name>, or force-moves it.
+        return [(pos[0], f"`git branch -f` moves protected branch '{pos[0]}'")]
+    return []
+
+
 def classify_branch(flags, short, pos, current, cwd, probe):
     """Verdict for `git branch`, scoped to what the session owns rather than to
     the verb. A target is in bounds when it is *recoverable* — its tip survives
@@ -880,25 +915,26 @@ def classify_branch(flags, short, pos, current, cwd, probe):
     `--delete`, `--move`, and `--copy`, and `-d --force` is `-D` spelled long —
     so force is read from the whole flag set, never from one letter.
 
-    Every branch here answers *shared* before it answers *recoverable*. Those
-    are independent questions and git only ever enforces the second one, so an
-    early return that proves a target recoverable and stops has silently
-    answered "not shared" without asking. That ordering mistake is what made
-    `git branch -d main` auto-approve."""
+    *Shared* and *recoverable* are independent questions, and git only ever
+    enforces the second. The shared one is therefore answered once for all
+    forms, up front, via `protected_targets` — not inside each verb branch,
+    where an early allow-return could sit above it and answer "not shared" by
+    omission. That is what made `git branch -d main` auto-approve, and hoisting
+    the check is what stops the next verb from repeating it."""
     force = 'f' in short or '--force' in flags or bool(short & {'D', 'M', 'C'})
     delete = bool(short & {'d', 'D'}) or '--delete' in flags
     move = bool(short & {'m', 'M'}) or '--move' in flags
     copy = bool(short & {'c', 'C'}) or '--copy' in flags
 
+    # Shared, once, for every form — before any verb branch can return `allow`.
+    # `-d` can't orphan commits, but it still drops the local ref, so a
+    # protected target asks whether or not git would permit the delete.
+    for name, reason in protected_targets(delete, move, copy, force, pos, current):
+        if is_protected(name):
+            return ('ask', reason)
+
+    # Recoverable, per form. Everything below may assume no target is shared.
     if delete:
-        # Shared before recoverable: `-d` can't orphan commits, but it still
-        # drops the local ref, so a protected target asks whether or not git
-        # would allow the delete. Checking recoverability first and returning
-        # would skip the question that matters here (see move/copy below, which
-        # order it the same way).
-        for b in pos:
-            if is_protected(b):
-                return ('ask', f"Deleting protected branch '{b}'")
         if not force:
             return ('allow', None)    # git itself refuses to drop unmerged work
         if not pos:
@@ -926,30 +962,18 @@ def classify_branch(flags, short, pos, current, cwd, probe):
         return ('allow', None)
 
     if move or copy:
-        # `-m <new>` renames the current branch; `-m <old> <new>` names both.
-        # A copy leaves its source alone, so only a rename can strand one.
         dst = pos[-1] if pos else None
-        src = pos[0] if len(pos) > 1 else (None if copy else current)
         if dst is None:
             return ('ask', "`git branch --move`/`--copy` names no branch")
-        if move and src is not None and is_protected(src):
-            return ('ask', f"Renaming protected branch '{src}'")
-        if is_protected(dst):
-            verb = 'Copying' if copy else 'Renaming'
-            return ('ask', f"{verb} a branch onto protected branch '{dst}'")
         if not force:
             return ('allow', None)    # git itself refuses an existing dest
         return overwrite_verdict(cwd, dst, '`git branch -M`' if move
                                  else '`git branch -C`', probe)
 
     if force:
-        # `git branch -f <name> [<start>]`: creates <name>, or force-moves it.
-        dst = pos[0] if pos else None
-        if dst is None:
+        if not pos:
             return ('ask', "`git branch --force` names no branch")
-        if is_protected(dst):
-            return ('ask', f"`git branch -f` moves protected branch '{dst}'")
-        return overwrite_verdict(cwd, dst, '`git branch -f`', probe)
+        return overwrite_verdict(cwd, pos[0], '`git branch -f`', probe)
 
     return ('allow', None)            # list or create
 
