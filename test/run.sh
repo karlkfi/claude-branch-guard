@@ -59,6 +59,12 @@ nat() {
 # only this run's dir — no blanket `rm -rf tmp` that would nuke a sibling run.
 mkdir -p "$REPO_ROOT/tmp"
 WORK="$(mktemp -d "$REPO_ROOT/tmp/test-repo.XXXXXX")"
+# One fixture (5f) needs a directory that is inside NO repo, which nothing under
+# tmp/ can be — this checkout is itself a repo. The platform temp dir is the
+# only such place the suite can reach, so it lives outside tmp/ deliberately;
+# the case that uses it asserts the not-a-repo precondition rather than assuming
+# it.
+OUTSIDE="$(mktemp -d "${TMPDIR:-/tmp}/branch-guard-outside.XXXXXX")"
 
 # Keep tests hermetic regardless of the caller's shell.
 unset BRANCH_GUARD_PUSH_POLICY
@@ -67,7 +73,7 @@ pass=0
 fail=0
 
 cleanup() {
-  rm -rf "$WORK"
+  rm -rf "$WORK" ${OUTSIDE:+"$OUTSIDE"}
 }
 trap cleanup EXIT INT TERM
 
@@ -303,7 +309,35 @@ fi
 check "edit symlink in ignored dir -> ignored file on main -> none" none \
   "$(decision_for "$(edit_payload Write file_path "$WORK/tmp/to-ignored.json")" "$REPO_ROOT")"
 
+# 5f. An edit names where the file WILL be, and that directory need not exist —
+#     agents create files in new directories constantly. `git -C` fails on a
+#     missing directory before it ever looks for a repo, so the branch read as
+#     unresolvable and the write went unguarded on `main`, silently. The two
+#     axes cross here: the branch (protected vs feature) and whether the
+#     not-yet-existing path is ignored, since neither alone pins the outcome.
+check "edit new file in a new dir on main -> ask" ask \
+  "$(decision_for "$(edit_payload Write file_path "$WORK/newdir/f.py")" "$REPO_ROOT")"
+check "edit new file in deeply nested new dirs on main -> ask" ask \
+  "$(decision_for "$(edit_payload Write file_path "$WORK/a/b/c/f.py")" "$REPO_ROOT")"
+#     The #58 gitignored skip still applies once the branch resolves: a new dir
+#     under an ignored one holds no branch contents either.
+check "edit new file in a new dir under a gitignored dir on main -> none" none \
+  "$(decision_for "$(edit_payload Write file_path "$WORK/tmp/newdir/f.py")" "$REPO_ROOT")"
+#     Walking up only ever reaches an ancestor of the file, so a path in no repo
+#     still resolves to no branch — the fail-safe half. Assert the precondition
+#     rather than trusting it: if the system temp dir were itself inside a repo,
+#     the case below would pass for the wrong reason.
+outside_is_repo=no
+git -C "$OUTSIDE" rev-parse --is-inside-work-tree >/dev/null 2>&1 && outside_is_repo=yes
+check "system temp dir sits in no repo (precondition)" no "$outside_is_repo"
+check "edit new file in a new dir outside any repo -> none" none \
+  "$(decision_for "$(edit_payload Write file_path "$OUTSIDE/newdir/f.py")" "$REPO_ROOT")"
+
 git -C "$WORK" checkout -q claude/x
+#     And the feature-branch control: the walk resolves a branch there too, it
+#     just isn't one worth prompting about.
+check "edit new file in a new dir on claude/x -> none" none \
+  "$(decision_for "$(edit_payload Write file_path "$WORK/newdir/f.py")" "$REPO_ROOT")"
 
 # 6. unknown tool / missing file_path -> no decision
 check "unknown tool -> none" none \

@@ -87,6 +87,7 @@ the default `strict` [push policy](#push-guard).
 | `git commit -m "fix"` *(on `main`)* | **ask** |
 | editing a file whose repo is on `main` *(Edit/Write/MultiEdit/NotebookEdit)* | **ask** |
 | editing a symlink in a gitignored dir that points at a tracked file, on `main` *(the write lands on branch contents)* | **ask** |
+| writing a new file into a directory that doesn't exist yet, on `main` *(`src/newdir/f.py`)* | **ask** |
 | `git push origin main` / `git push origin HEAD:main` | **ask** |
 | `git push origin other-branch` *(strict policy)* | **ask** |
 | `git push origin v1.3.0` / `git push origin refs/tags/v1.3.0` / `git push --tags` *(publishes a tag, strict policy)* | **ask** |
@@ -259,7 +260,10 @@ edit to a file checked out on `main` (e.g. a parent repo path) even while your
 session's cwd is a feature-branch worktree. A **relative** `file_path` is first
 resolved against the session's `cwd` (from the hook payload), so an edit inside a
 nested worktree resolves to the worktree's branch even when the hook process runs
-from the parent checkout — not falsely against the parent's `main`.
+from the parent checkout — not falsely against the parent's `main`. When the
+file's directory doesn't exist yet (a write into a new directory), the branch is
+read from the nearest existing ancestor, which sits in the same repository; a
+path under no repository still resolves to no branch and defers.
 
 A **gitignored** path is exempt: writing `tmp/scratch.json` on `main` gets no
 prompt, because an ignored file holds no branch contents and the decision would

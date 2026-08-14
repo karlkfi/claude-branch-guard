@@ -1240,6 +1240,29 @@ def tip_is_recoverable(cwd, name):
     return bool(r.stdout.strip())
 
 
+def nearest_existing_dir(path):
+    """The closest ancestor of <path> that exists on disk, or <path> itself.
+
+    An edit names where the file WILL be, which need not exist yet — agents
+    create files in new directories constantly. `git -C` on a missing directory
+    fails before it ever looks for a repo, so the branch probe read "no repo"
+    from what is really "no directory" and the edit deferred with no prompt.
+    The branch is knowable from any existing ancestor, because a repo covers its
+    whole subtree — including the directory about to be created in it.
+
+    Climbing stops at the filesystem root, which is not a repo, so a path under
+    no repo still resolves to no branch and defers exactly as before. When an
+    ancestor IS a repo the walk finds it, and that is the right answer for the
+    right reason: the new file lands inside that repo's worktree.
+    """
+    while path and not os.path.isdir(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    return path
+
+
 def path_is_ignored(repo_dir, path):
     """True if the file <path> writes to is gitignored, so an edit to it can't
     change what the branch contains. False on every other answer — including
@@ -1407,7 +1430,10 @@ def main():
         # would land in the wrong repo and resolve the wrong branch.
         cwd = data.get('cwd') or os.getcwd()
         abs_path = file_path if os.path.isabs(file_path) else os.path.join(cwd, file_path)
-        repo_dir = os.path.dirname(abs_path) or cwd
+        # The file's directory need not exist yet (a write into a new dir), and
+        # `git -C` fails on a missing one before looking for a repo — so ask the
+        # nearest existing ancestor, which is in the same repo (or in none).
+        repo_dir = nearest_existing_dir(os.path.dirname(abs_path) or cwd)
         branch = current_branch(repo_dir)
         if branch is None:
             return
