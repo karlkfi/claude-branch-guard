@@ -478,8 +478,40 @@ check "git checkout <ambiguous> -> none (defer)" none \
   "$(decision_for "$(bash_cmd 'git checkout file.txt')" "$WORK")"
 
 # 14. Destructive git commands ask (and deny when unattended).
-check "git reset --hard -> ask" ask \
+#     `git reset --hard` does two things and only one is a ref operation: it
+#     moves the branch pointer, and it discards uncommitted changes to tracked
+#     files. Uncommitted work is in no ref, so a dirty worktree always asks; a
+#     clean one reduces the command to the pointer move, where the same
+#     shared/recoverable pair applies. Crossed both ways, per the rule above.
+printf 'dirty\n' >> "$WORK/file.txt"
+check "git reset --hard, dirty worktree -> ask" ask \
   "$(decision_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK")"
+check "[auto] git reset --hard, dirty worktree -> deny" deny \
+  "$(decision_for "$(push_mode 'git reset --hard' 'auto')" "$WORK")"
+git -C "$WORK" checkout -q -- file.txt
+check "git reset --hard, clean worktree on a recoverable branch -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK")"
+#     `reset` never deletes untracked or ignored files, so an untracked file
+#     must not read as dirty -- that is what `--porcelain -uno` buys, and
+#     without it this prompts for something the command cannot destroy.
+printf 'scratch\n' > "$WORK/untracked-scratch.txt"
+check "git reset --hard, only an untracked file present -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK")"
+rm -f "$WORK/untracked-scratch.txt"
+#     Shared first, as everywhere else.
+git -C "$WORK" checkout -q main
+check "git reset --hard on protected -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK")"
+git -C "$WORK" checkout -q claude/x
+#     A tip nothing else reaches keeps the ask even with a clean worktree.
+git -C "$WORK" checkout -q -b reset-orphan
+git -C "$WORK" commit -q --allow-empty -m "unreachable from anything"
+check "git reset --hard on an irrecoverable tip -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK")"
+git -C "$WORK" checkout -q claude/x
+#     The probes read the session repo, so a foreign one keeps the ask.
+check "git -C other-repo reset --hard -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git -C /somewhere/else reset --hard')" "$WORK")"
 check "git reset --soft -> none (defer)" none \
   "$(decision_for "$(bash_cmd 'git reset --soft HEAD~1')" "$WORK")"
 check "git clean -fd -> ask" ask \
@@ -512,9 +544,9 @@ check "git config --global -> ask" ask \
 check "git stash drop -> ask" ask \
   "$(decision_for "$(bash_cmd 'git stash drop')" "$WORK")"
 check "readonly + destructive chain -> ask" ask \
-  "$(decision_for "$(bash_cmd 'git status && git reset --hard')" "$WORK")"
-check "[auto] git reset --hard -> deny" deny \
-  "$(decision_for "$(push_mode 'git reset --hard' 'auto')" "$WORK")"
+  "$(decision_for "$(bash_cmd 'git status && git clean -fd')" "$WORK")"
+check "[auto] git clean -fd -> deny" deny \
+  "$(decision_for "$(push_mode 'git clean -fd' 'auto')" "$WORK")"
 
 # 15. Branch-sensitive mutations: feature -> allow, protected -> ask.
 check "git rebase on feature -> allow" allow \
@@ -755,8 +787,8 @@ check "git log &>/dev/null -> allow" allow \
 # A redirect doesn't weaken a protective ask.
 check "git push origin main 2>&1 -> ask" ask \
   "$(decision_for "$(bash_cmd 'git push origin main 2>&1')" "$WORK")"
-check "git reset --hard 2>&1 -> ask" ask \
-  "$(decision_for "$(bash_cmd 'git reset --hard 2>&1')" "$WORK")"
+check "git clean -fd 2>&1 -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git clean -fd 2>&1')" "$WORK")"
 
 # ---------------------------------------------------------------------------
 # 21. Redirect-write awareness (hardening). An output redirect to a real FILE is
@@ -778,8 +810,8 @@ check "git log >/dev/null -> allow" allow \
 check "git log >/dev/stdout -> allow" allow \
   "$(decision_for "$(bash_cmd 'git log >/dev/stdout')" "$WORK")"
 # A file-writing redirect must NOT weaken a protective ask.
-check "git reset --hard > out -> ask (write doesn't weaken ask)" ask \
-  "$(decision_for "$(bash_cmd 'git reset --hard > out.txt')" "$WORK")"
+check "git clean -fd > out -> ask (write doesn't weaken ask)" ask \
+  "$(decision_for "$(bash_cmd 'git clean -fd > out.txt')" "$WORK")"
 # A bare redirect with no command writes a file -> it blocks the chain.
 check "> out ; git status -> none (bare write blocks)" none \
   "$(decision_for "$(bash_cmd '> out.txt ; git status')" "$WORK")"
@@ -819,8 +851,8 @@ check 'git status ; echo $(rm) -> none (subst)' none \
 check "git status && echo done && rm -rf foo -> none" none \
   "$(decision_for "$(bash_cmd 'git status && echo done && rm -rf foo')" "$WORK")"
 # A benign segment must NOT weaken a protective ask.
-check "git reset --hard ; echo done -> ask" ask \
-  "$(decision_for "$(bash_cmd 'git reset --hard ; echo done')" "$WORK")"
+check "git clean -fd ; echo done -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git clean -fd ; echo done')" "$WORK")"
 
 # ---------------------------------------------------------------------------
 # 23. Heredoc bodies are treated as opaque data, not command segments. A body

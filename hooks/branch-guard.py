@@ -978,6 +978,38 @@ def classify_branch(flags, short, pos, current, cwd, probe):
     return ('allow', None)            # list or create
 
 
+def classify_reset(branch, cwd, probe):
+    """Verdict for `git reset --hard` (and the `--merge`/`--keep` forms).
+
+    The command does two things, and only one of them is a ref operation: it
+    moves the current branch pointer, and it discards uncommitted changes to
+    tracked files. Uncommitted work is reachable from no ref, so nothing can
+    prove it recoverable — which is why a dirty worktree always asks, and why
+    the ownership model can't simply be applied to this verb the way it is to
+    `git branch`.
+
+    With a clean worktree there is nothing to discard, so the command reduces
+    to the pointer move and the same two questions apply: an unprotected branch
+    whose tip survives on a remote-tracking ref or main costs a
+    `git reset --hard <sha>` to put back. Shared is answered first, as
+    everywhere else. Every probe that can't answer keeps the `ask`."""
+    if branch is None:
+        return ('ask', "`git reset --hard` discards changes")
+    if is_protected(branch):
+        return ('ask', f"`git reset --hard` on protected branch '{branch}'")
+    if not probe:
+        return ('ask', "`git reset --hard` discards changes, and a "
+                       "`git -C`/`--git-dir` option points at another "
+                       "repository, so branch-guard can't check that one")
+    if worktree_is_clean(cwd) is not True:
+        return ('ask', "`git reset --hard` discards uncommitted changes to "
+                       "tracked files")
+    if tip_is_recoverable(cwd, branch) is not True:
+        return ('ask', f"`git reset --hard` moves branch '{branch}', whose tip "
+                       f"isn't reachable from any remote-tracking branch or main")
+    return ('allow', None)
+
+
 def classify_git(sub, args, branch, policy, cwd, probe):
     """Verdict ('allow' | 'ask' | 'defer', reason) for a `git <sub>` command."""
     flags = {a for a in args if a.startswith('-')}
@@ -1045,7 +1077,7 @@ def classify_git(sub, args, branch, policy, cwd, probe):
         return ('ask', "`git pull` may merge or rebase (use --ff-only to skip this check)")
     if sub == 'reset':
         if flags & {'--hard', '--merge', '--keep'}:
-            return ('ask', "`git reset --hard` discards changes")
+            return classify_reset(branch, cwd, probe)
         return ('defer', None)            # soft/mixed -> normal flow
     if sub == 'clean':
         # clean is a no-op without --force; -f is what makes it delete.
@@ -1225,6 +1257,20 @@ def branch_exists(cwd, name):
     if r.returncode == 1:
         return False
     return None                       # 128: malformed ref name, or not a repo
+
+
+def worktree_is_clean(cwd):
+    """True if no TRACKED file is modified or staged; False if some are; None
+    when the query can't answer.
+
+    `-uno` omits untracked files on purpose. `git reset` never deletes them
+    (measured on git 2.55: an untracked file and an ignored one both survive
+    `reset --hard`), so they are not at risk, and counting a stray scratch file
+    as dirty would prompt for something the command cannot destroy."""
+    r = run_git(cwd, 'status', '--porcelain', '-uno')
+    if r is None or r.returncode != 0:
+        return None
+    return not r.stdout.strip()
 
 
 def tip_is_recoverable(cwd, name):

@@ -84,13 +84,14 @@ the default `strict` [push policy](#push-guard).
 | `git branch -d old` / `git branch -m old new` / `git branch -c old copy` *(unprotected target; git refuses the unsafe cases itself)* | allow |
 | `git branch -D old` *(tip survives on a remote-tracking branch or `main`)* | allow |
 | `git branch -f backup claude/x` *(the ref doesn't exist yet — a create)* | allow |
+| `git reset --hard origin/main` *(clean worktree, feature branch whose tip survives elsewhere)* | allow |
 | `git commit -m "fix"` *(on `main`)* | **ask** |
 | editing a file whose repo is on `main` *(Edit/Write/MultiEdit/NotebookEdit)* | **ask** |
 | editing a symlink in a gitignored dir that points at a tracked file, on `main` *(the write lands on branch contents)* | **ask** |
 | `git push origin main` / `git push origin HEAD:main` | **ask** |
 | `git push origin other-branch` *(strict policy)* | **ask** |
 | `git push origin v1.3.0` / `git push origin refs/tags/v1.3.0` / `git push --tags` *(publishes a tag, strict policy)* | **ask** |
-| `git reset --hard HEAD~1` | **ask** |
+| `git reset --hard HEAD~1` *(uncommitted changes to tracked files, or a tip nothing else reaches, or on `main`)* | **ask** |
 | `git clean -fd` | **ask** |
 | `git branch -D old` *(tip reachable from nothing else — the commits would be orphaned)* | **ask** |
 | `git branch -d main` / `git branch -D main` / `git branch -m x main` *(protected branch, any spelling)* | **ask** |
@@ -177,6 +178,25 @@ last `git fetch`. A stale `refs/remotes/origin/x` left behind after the branch
 was deleted on the remote still reads as recoverable. Like the rest of the hook
 this is best-effort friction reduction, not a guarantee — see
 [Limitations](#limitations).
+
+`git reset --hard` gets the same test, but only when it has nothing else to
+destroy. The command does two things: it moves the current branch pointer, and
+it throws away uncommitted changes to tracked files. Uncommitted work exists in
+no ref, so nothing can show it's recoverable — which is why a **dirty worktree
+always prompts**. With a clean worktree the command is just the pointer move,
+and the ordinary test applies: an unprotected branch whose tip survives
+elsewhere auto-approves, because putting it back costs one
+`git reset --hard <sha>`.
+
+Untracked and ignored files don't count as dirty, because `reset` never deletes
+them. A stray scratch file in your worktree isn't at risk, so it doesn't earn a
+prompt.
+
+The other destructive commands stay gated by what they are, not what they
+target, because there's nothing for this test to check. `git clean -f` deletes
+untracked files, which exist in no ref by definition, and a dropped stash
+survives only in the reflog. Those prompts aren't friction to be tuned away —
+they're the cases where the work really can vanish.
 
 One narrow relaxation of the all-segments rule covers a constant AI-agent habit:
 piping read-only git/gh output through a pager. A trailing segment also counts as
