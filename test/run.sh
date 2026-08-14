@@ -583,8 +583,20 @@ check_text "git branch -d --force reason names the delete" has \
   "$(reason_for "$(bash_cmd 'git branch -d --force old')" "$WORK")"
 check "git restore (worktree) -> ask" ask \
   "$(decision_for "$(bash_cmd 'git restore file.txt')" "$WORK")"
-check "git worktree remove -> ask" ask \
+#     git refuses to remove a worktree holding modified OR untracked files
+#     (exit 128, "use --force to delete it"), so the non-force form cannot
+#     destroy uncommitted work -- the same "git enforces it" reasoning as
+#     `branch -d`. Crossed against the force spelling, which can.
+check "git worktree remove -> allow (git refuses a dirty one)" allow \
   "$(decision_for "$(bash_cmd 'git worktree remove ../wt')" "$WORK")"
+check "git worktree remove --force -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git worktree remove --force ../wt')" "$WORK")"
+check "git worktree remove -f -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git worktree remove -f ../wt')" "$WORK")"
+check "git worktree prune -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git worktree prune')" "$WORK")"
+check "git worktree move -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git worktree move ../wt ../wt2')" "$WORK")"
 check "git config --global -> ask" ask \
   "$(decision_for "$(bash_cmd 'git config --global user.name x')" "$WORK")"
 check "git stash drop -> ask" ask \

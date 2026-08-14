@@ -69,6 +69,7 @@ the default `strict` [push policy](#push-guard).
 | `git add -A` | allow |
 | `git switch -c claude/y` / `git checkout -b claude/y` | allow |
 | `git worktree add ../wt feature` | allow |
+| `git worktree remove ../wt` *(git refuses one holding modified or untracked files)* | allow |
 | `git commit -m "fix"` *(feature branch)* | allow |
 | `git add -A && git commit -m x && git push` *(feature branch)* | allow |
 | `git push` / `git push -u origin HEAD` *(worktree branch)* | allow |
@@ -108,6 +109,7 @@ the default `strict` [push policy](#push-guard).
 | `gh api -X DELETE …/labels/bug` *(deletes a label)* | **ask** |
 | `gh api -X DELETE repos/o/r` *(deletes a repository — exact `repos/{o}/{r}` path)* | **ask** |
 | `git restore file.txt` *(discards working changes)* | **ask** |
+| `git worktree remove --force ../wt` *(deletes a worktree holding modified or untracked files)* | **ask** |
 | `git config --global user.name x` | **ask** |
 | `git pull` / `git pull --rebase` *(on `main` — lands a merge, or rewrites history)* | **ask** |
 | `git rebase`/`git merge` *(onto `main`)* | **ask** |

@@ -1054,8 +1054,19 @@ def classify_git(sub, args, branch, policy, cwd, probe):
     if sub == 'worktree':
         if first in ('add', 'list', 'lock', 'unlock'):
             return ('allow', None)
-        if first in ('remove', 'prune', 'move'):
-            return ('ask', "Removing/moving a git worktree")
+        if first == 'remove':
+            # git enforces this one itself, the same way it does for
+            # `branch -d`: it refuses to remove a worktree containing modified
+            # OR untracked files (measured on git 2.55 — exit 128, "use --force
+            # to delete it"). That is stricter than `reset --hard`, which leaves
+            # untracked files alone, so the non-force form cannot destroy
+            # uncommitted work and needs no probe. Only `--force` can.
+            if 'f' in short or '--force' in flags:
+                return ('ask', "`git worktree remove --force` deletes a worktree "
+                               "holding modified or untracked files")
+            return ('allow', None)
+        if first in ('prune', 'move'):
+            return ('ask', "Pruning or moving a git worktree")
         return ('defer', None)
     if sub == 'stash':
         if first in ('drop', 'clear'):
