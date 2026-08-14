@@ -81,6 +81,7 @@ the default `strict` [push policy](#push-guard).
 | `git commit -F- <<'EOF' … EOF` *(feature branch; heredoc body is opaque data)* | allow |
 | `git fetch 2>/dev/null` / `git log >/dev/null 2>&1` *(discard redirect / fd-dup)* | allow |
 | `git pull --ff-only` | allow |
+| `git pull` / `git pull --rebase` *(feature branch — as `fetch`, `merge`, and `rebase` already are)* | allow |
 | `git branch -d old` / `git branch -m old new` / `git branch -c old copy` *(unprotected target; git refuses the unsafe cases itself)* | allow |
 | `git branch -D old` *(tip survives on a remote-tracking branch or `main`)* | allow |
 | `git branch -f backup claude/x` *(the ref doesn't exist yet — a create)* | allow |
@@ -106,7 +107,7 @@ the default `strict` [push policy](#push-guard).
 | `gh api -X DELETE repos/o/r` *(deletes a repository — exact `repos/{o}/{r}` path)* | **ask** |
 | `git restore file.txt` *(discards working changes)* | **ask** |
 | `git config --global user.name x` | **ask** |
-| `git pull` *(may merge or rebase)* | **ask** |
+| `git pull` / `git pull --rebase` *(on `main` — lands a merge, or rewrites history)* | **ask** |
 | `git rebase`/`git merge` *(onto `main`)* | **ask** |
 | editing a **gitignored** path on `main` *(`tmp/scratch.json` — nothing the branch can contain)* | defer |
 | `git status && rm -rf foo` *(non-git segment)* | defer |
@@ -582,8 +583,10 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   rule still prompts on main/master.
 - **Push the worktree's own branch.** `git push` / `git push -u origin HEAD`
   auto-approves; pushing a different branch or a refspec like `HEAD:main` prompts.
-- **Prefer fast-forward pulls.** `git pull --ff-only` is auto-approved; a bare
-  `git pull` (which may merge or rebase) prompts.
+- **Prefer fast-forward pulls on a protected branch.** On a feature branch a
+  bare `git pull` is auto-approved. On `main` it prompts, because it lands a
+  merge or rewrites history — `git pull --ff-only` is auto-approved there, since
+  it only advances the branch to what the remote already has.
 - **Chaining git/gh with harmless labels is fine; a real command is not.**
   Read-only labels/no-ops ride along, so `git log … ; echo "---" ; git status`
   and `git log | head` auto-approve — but `git commit && <other-command>` prompts

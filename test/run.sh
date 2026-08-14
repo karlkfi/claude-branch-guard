@@ -603,13 +603,28 @@ check "git rebase --abort -> allow" allow \
   "$(decision_for "$(bash_cmd 'git rebase --abort')" "$WORK")"
 check "git pull --ff-only -> allow" allow \
   "$(decision_for "$(bash_cmd 'git pull --ff-only')" "$WORK")"
-check "git pull (non-ff) -> ask" ask \
+#     `pull` is `fetch` + `merge`-or-`rebase`, all three of which allow on a
+#     feature branch, so gating the composite there was stricter than any of
+#     its parts. Crossed against the protected branch below.
+check "git pull (non-ff) on a feature branch -> allow" allow \
   "$(decision_for "$(bash_cmd 'git pull')" "$WORK")"
+check "git pull --rebase on a feature branch -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git pull --rebase')" "$WORK")"
 git -C "$WORK" checkout -q main
 check "git rebase on main -> ask" ask \
   "$(decision_for "$(bash_cmd 'git rebase origin/main')" "$WORK")"
 check "git merge on main -> ask" ask \
   "$(decision_for "$(bash_cmd 'git merge feature-y')" "$WORK")"
+check "git pull (non-ff) on main -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git pull')" "$WORK")"
+check "git pull --rebase on main -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git pull --rebase')" "$WORK")"
+check_text "git pull on main names the branch" has \
+  "protected branch 'main'" "$(reason_for "$(bash_cmd 'git pull')" "$WORK")"
+#     A fast-forward adds no local work to the branch, so it stays allowed even
+#     on a protected one -- it only advances main to what the remote already has.
+check "git pull --ff-only on main -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git pull --ff-only')" "$WORK")"
 git -C "$WORK" checkout -q claude/x
 
 # 16. Inline-config escape hatch blocks auto-allow but not a protective ask.

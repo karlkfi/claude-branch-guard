@@ -1073,8 +1073,14 @@ def classify_git(sub, args, branch, policy, cwd, probe):
         return _feature(branch, "`git rebase` on a protected branch")
     if sub == 'pull':
         if '--ff-only' in flags:
-            return ('allow', None)
-        return ('ask', "`git pull` may merge or rebase (use --ff-only to skip this check)")
+            return ('allow', None)        # advances the branch; adds no local work
+        # `pull` is `fetch` plus `merge`-or-`rebase`, and all three of those are
+        # allowed on a non-protected branch — so gating the composite there made
+        # it stricter than every one of its parts, for a branch nobody else
+        # depends on. On a protected branch it lands a merge (or rewrites
+        # history) and asks, like `merge`/`rebase` do.
+        return _feature(branch, f"`git pull` may merge or rebase onto protected "
+                                f"branch '{branch}'")
     if sub == 'reset':
         if flags & {'--hard', '--merge', '--keep'}:
             return classify_reset(branch, cwd, probe)
