@@ -174,6 +174,18 @@ launcher_err="$(printf '' | "$LAUNCHER" definitely-not-a-real-script.py 2>&1)" \
 check "launcher rejects a missing script -> exit 1" 1 "$launcher_rc"
 check_text "launcher says why it failed" has "script not found" "$launcher_err"
 
+#    The launcher-coverage claim, asserted directly. Every fixture reaches the
+#    hook through `decision_for`/`reason_for`, and both invoke "$LAUNCHER" --
+#    but that is a convention, and a convention is what a new fixture breaks.
+#    A case count never checked this: a fixture running the interpreter itself
+#    would increment the count, pass, and quietly leave the launcher covered by
+#    one case instead of all of them. So check the property, not a proxy for it.
+bypasses="$(grep -nE '(^|[^-A-Za-z_])(python3?)([^-A-Za-z_]|$).*branch-guard\.py' \
+  "$SCRIPT_DIR/run.sh" || true)"
+check "no fixture invokes the hook outside the launcher" "" "$bypasses"
+check "both hook helpers go through the launcher" 2 \
+  "$(grep -c '"\$LAUNCHER" "\$HOOK_SCRIPT"' "$SCRIPT_DIR/run.sh")"
+
 #    Which half of the polyglot answered is itself a coverage claim, so pin it.
 #    Git Bash hands a .cmd to the Windows command processor, so the batch branch
 #    runs there (`%~dp0`, backslashes) and the POSIX tail runs everywhere else
@@ -1140,24 +1152,24 @@ check "[configured] branch -D release/1.2 -> ask (no longer private)" ask \
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 
-# CLAUDE.md backs its launcher-coverage claim with this suite's case count.
-# That number is prose, so nothing stopped a fixture from landing and leaving
-# it stale -- it had drifted by three before anyone noticed. Assert it here
-# rather than in CI: a case count is only knowable by running the suite, and
-# the suite already runs on every job. This check is not itself a fixture, so
-# it does not perturb the number it is checking.
+# A FLOOR, not an exact count. The suite used to assert its own size against a
+# number written in CLAUDE.md, which had two problems. It raced: the size is a
+# global property but every branch validated it against its own base, so two
+# fixture-adding PRs that each bumped correctly left main wrong by the second
+# one's delta -- which is exactly how main went red at 316-documented-as-310.
+# And it never checked the property it was advertised as defending: a fixture
+# invoking the interpreter directly would increment the count and pass.
+#
+# The floor keeps the one thing the count genuinely caught -- a suite that
+# silently collapses, because setup failed or a section exited early -- while
+# conflicting with nobody. Raise it when the suite grows a lot; nothing breaks
+# if it lags.
+CASE_FLOOR=280
 counts_ok=1
-if [[ -f "$REPO_ROOT/CLAUDE.md" ]]; then
-  documented="$(grep -oE 'covered by all [0-9]+ cases' "$REPO_ROOT/CLAUDE.md" \
-    | grep -oE '[0-9]+' || true)"
-  if [[ -z "$documented" ]]; then
-    printf 'CLAUDE.md no longer states a case count; update it or this check\n' >&2
-    counts_ok=0
-  elif [[ "$documented" -ne $((pass + fail)) ]]; then
-    printf 'CLAUDE.md says %s cases, this run had %d\n' \
-      "$documented" "$((pass + fail))" >&2
-    counts_ok=0
-  fi
+if [[ $((pass + fail)) -lt "$CASE_FLOOR" ]]; then
+  printf 'suite ran %d cases, under the floor of %d — did setup fail, or a section exit early?\n' \
+    "$((pass + fail))" "$CASE_FLOOR" >&2
+  counts_ok=0
 fi
 
 [[ "$fail" -eq 0 && "$counts_ok" -eq 1 ]]
