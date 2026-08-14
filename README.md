@@ -100,7 +100,7 @@ the default `strict` [push policy](#push-guard).
 | `git branch -D old` *(tip reachable from nothing else — the commits would be orphaned)* | **ask** |
 | `git branch -d main` / `git branch -D main` / `git branch -m x main` *(protected branch, any spelling)* | **ask** |
 | `git branch -f old main` / `git branch -M x old` *(moves an existing branch off commits nothing else reaches)* | **ask** |
-| `gh pr merge 5 --delete-branch` / `gh pr close 5 -d` *(deletes the branch)* | **ask** |
+| `gh pr close 5 --delete-branch` / `gh pr close 5 -d` *(deletes a branch whose work was never merged)* | **ask** |
 | `gh repo delete owner/repo` / `gh label delete bug` *(deletes a resource)* | **ask** |
 | `gh release delete v1` / `gh release delete-asset v1 file.zip` / `gh secret delete X` / `gh variable delete Y` / `gh gist delete abc` / `gh cache delete 1` *(deletes a resource; `secret`/`variable` also via the `remove` alias)* | **ask** |
 | `gh workflow disable ci.yml` *(disables a workflow)* | **ask** |
@@ -121,7 +121,7 @@ the default `strict` [push policy](#push-guard).
 | `git status <(touch evil)` *(process substitution)* | defer |
 | `git checkout file.txt` *(ambiguous: branch vs. file)* | defer |
 | `git -c core.pager=cat log` *(inline-config escape hatch)* | defer |
-| `gh pr create` / `gh pr merge 5` / `gh run rerun` *(gh mutation, no branch delete)* | defer |
+| `gh pr create` / `gh pr merge 5` / `gh pr merge 5 --delete-branch` / `gh run rerun` *(gh mutation; the merge lands the work before the branch is deleted)* | defer |
 | `gh api -X POST …` / `gh api … -f k=v` *(a write: non-GET method or a request body)* | defer |
 | `gh api -X DELETE user/following/x` / `gh api -X DELETE repos/o/r/issues/comments/1` *(non-repo API delete — not a recognized destructive endpoint)* | defer |
 | `ls -la` *(not a git/gh command)* | defer |
@@ -534,7 +534,7 @@ update step and restart.
    branch-sensitive mutations (`commit`, `merge`, `rebase`, `cherry-pick`,
    `stash`, `push`) allow on a feature branch and ask on a protected one;
    destructive commands (`reset --hard`, `clean -f`, `branch -D`, and gh
-   deletes/disables — a branch via `gh pr merge|close --delete-branch` or
+   deletes/disables — a branch via `gh pr close --delete-branch` or
    `gh api -X DELETE …/git/refs/heads/…`; a repo via `gh repo delete` or
    `gh api -X DELETE repos/{o}/{r}`; a label via `gh label delete` /
    `gh api -X DELETE …/labels/…`; a release/secret/variable/gist/cache via

@@ -679,6 +679,16 @@ for c in "gh run rerun 123" "gh run cancel 123" "gh workflow run ci.yml" \
          "gh release download v1"; do
   check "gh mutation: $c -> none (defer)" none "$(decision_for "$(bash_cmd "$c")" "$WORK")"
 done
+#      `--delete-branch` on a MERGE defers with it. The merge lands the work on
+#      the base branch before the delete runs, so the delete adds no risk beyond
+#      the merge -- and escalating it to `ask` while `gh pr merge` defers
+#      overrode the user's own settings for the safer of the two spellings.
+#      Crossed against `gh pr close`, where the work was never merged, below.
+for c in "gh pr merge 5 --delete-branch" "gh pr merge 5 -d" \
+         "gh pr merge 5 --squash --delete-branch"; do
+  check "gh pr merge + delete: $c -> none (defer)" none \
+    "$(decision_for "$(bash_cmd "$c")" "$WORK")"
+done
 
 # 17c. `gh api` is classified by HTTP method: a default/explicit GET reads (allow);
 #      a write method or a request body (--field/--raw-field/--input) defers.
@@ -707,10 +717,12 @@ done
 #      form, plus the `remove` alias for secret/variable and `gh workflow
 #      disable`), a label/repo delete via
 #      the api, and a repo delete via the api refs/labels/repos endpoints.
+check_text "gh pr close --delete-branch reason says the work was never merged" has \
+  "work was never merged" \
+  "$(reason_for "$(bash_cmd 'gh pr close 5 --delete-branch')" "$WORK")"
 for c in "gh api -X DELETE repos/o/r/git/refs/heads/feature-x" \
          "gh api -XDELETE repos/o/r/git/refs/heads/main" \
          "gh api --method DELETE repos/o/r/git/refs/tags/v1" \
-         "gh pr merge 5 --delete-branch" "gh pr merge 5 -d" \
          "gh pr close 5 --delete-branch" "gh pr close 5 -d" \
          "gh repo delete owner/repo" "gh repo delete owner/repo --yes" \
          "gh label delete bug" "gh label delete bug --yes" \
