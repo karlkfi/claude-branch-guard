@@ -16,10 +16,6 @@ The protected-branch set is `is_protected`/`protected_patterns`: `DEFAULT_PROTEC
 
 `confirm()` converts a would-be `ask` into a `deny` when `permission_mode` is one of `NON_INTERACTIVE_MODES` (`auto`/`dontAsk`/`bypassPermissions`) — no human is present to answer, so the guard fails safe. Every `ask` (the single Bash combine-site and the edit path) goes through `confirm()`; `allow` and defer are never downgraded. Classifier verdicts carry only the *cause* ("Push targets 'v1.3.0', not the worktree branch 'x'") with no closing clause — `confirm()` appends one per path, so an `ask` invites a confirmation and a `deny` states there is none, names the mode, and says retrying won't help. Keep that split: a confirm-shaped denial makes an agent retry a command it can never get approved. `main()` is the one place that emits.
 
-## Model selection
-
-Use the `model-advisor` skill to assess the right model and thinking level at session start and whenever the task type shifts significantly (e.g. moving from a one-line regex tweak to reworking how the hook tokenizes commands or resolves branches).
-
 ## Development philosophy
 
 Build the right thing AND build it well. Before writing any code, state the goal in one sentence and the approach in two or three. If the goal is unclear, ask one focused question rather than guessing.
