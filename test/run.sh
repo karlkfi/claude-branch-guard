@@ -423,6 +423,60 @@ check "[default=strict] push origin refs/heads/claude/x -> allow" allow \
 check "[default=strict] push --follow-tags -> allow" allow \
   "$(decision_for "$(push 'git push --follow-tags')" "$WORK")"
 
+# 7b. A rebase-and-force-push flow rewrites one branch from another, so the
+#     destination is never the worktree branch and every spelling of it asked.
+#     `--force-with-lease=<dst>` makes git abort unless the remote is still at
+#     the commit the command named, so the push cannot clobber work the session
+#     hasn't seen — the same "git already enforces it" argument the non-force
+#     `git branch` spellings rest on. The lease must NAME the destination, so a
+#     cross-name push states its target twice.
+check "[default=strict] leased rewrite of another branch -> allow" allow \
+  "$(decision_for "$(push 'git push --force-with-lease=other:abc123 origin claude/x:other')" "$WORK")"
+check "[default=strict] leased rewrite, lease without a sha -> allow" allow \
+  "$(decision_for "$(push 'git push --force-with-lease=other origin claude/x:other')" "$WORK")"
+check "[default=strict] leased rewrite from HEAD -> allow" allow \
+  "$(decision_for "$(push 'git push --force-with-lease=other origin HEAD:other')" "$WORK")"
+check "[default=strict] leased rewrite, fully-qualified dst -> allow" allow \
+  "$(decision_for "$(push 'git push --force-with-lease=refs/heads/other origin HEAD:refs/heads/other')" "$WORK")"
+# The cells that must stay closed, crossed against each question a lease does
+# NOT answer. Recoverability and sharedness are independent, and git enforces
+# only the first: `is_protected` runs before the strict block, so no lease can
+# reach past it onto a protected destination.
+check "[default=strict] cross-name push without a lease -> ask" ask \
+  "$(decision_for "$(push 'git push origin claude/x:other')" "$WORK")"
+check "[default=strict] bare --force-with-lease names no dst -> ask" ask \
+  "$(decision_for "$(push 'git push --force-with-lease origin claude/x:other')" "$WORK")"
+check "[default=strict] lease names a different branch -> ask" ask \
+  "$(decision_for "$(push 'git push --force-with-lease=elsewhere origin claude/x:other')" "$WORK")"
+check "[default=strict] leased rewrite of main -> ask" ask \
+  "$(decision_for "$(push 'git push --force-with-lease=main origin claude/x:main')" "$WORK")"
+# The source must be the worktree branch: a lease bounds the destination, not
+# which local branch is being sent.
+check "[default=strict] leased push of a foreign source -> ask" ask \
+  "$(decision_for "$(push 'git push --force-with-lease=other origin feature-y:other')" "$WORK")"
+# A lease bounds what the remote is when the ref goes, not whether removing it
+# is in bounds — so both deletion spellings keep asking.
+check "[default=strict] leased --delete -> ask" ask \
+  "$(decision_for "$(push 'git push --delete --force-with-lease=other origin other')" "$WORK")"
+check "[default=strict] leased delete via empty source -> ask" ask \
+  "$(decision_for "$(push 'git push --force-with-lease=other origin :other')" "$WORK")"
+# git lets a later --no-force-with-lease cancel every earlier lease, so the
+# guard has to as well or the flag would allow a push git then refuses to fence.
+check "[default=strict] --no-force-with-lease cancels the lease -> ask" ask \
+  "$(decision_for "$(push 'git push --force-with-lease=other --no-force-with-lease origin HEAD:other')" "$WORK")"
+# A lease naming a non-branch ref names no destination branch (section 7a).
+check "[default=strict] lease on a tag ref -> ask" ask \
+  "$(decision_for "$(push 'git push --force-with-lease=refs/tags/v1 origin HEAD:refs/tags/v1')" "$WORK")"
+# The whole point of the relaxation is auto mode, where the ask it replaces was
+# a deny with no way to answer it — so pin both halves under 'auto'.
+check "[auto] leased rewrite of another branch -> allow" allow \
+  "$(decision_for "$(push_mode 'git push --force-with-lease=other origin HEAD:other' 'auto')" "$WORK")"
+check "[auto] cross-name push without a lease -> deny" deny \
+  "$(decision_for "$(push_mode 'git push origin HEAD:other' 'auto')" "$WORK")"
+# `protected` never auto-approves, so the lease must not leak a push into it.
+check "[protected] leased rewrite of another branch -> none" none \
+  "$(decision_for "$(push 'git push --force-with-lease=other origin HEAD:other')" "$WORK" "$PROT")"
+
 # 8. protected policy: ask only on a protected target; never auto-approve.
 check "[protected] push origin main -> ask" ask \
   "$(decision_for "$(push 'git push origin main')" "$WORK" "$PROT")"
@@ -1207,6 +1261,14 @@ check "[unset] branch -D release/1.2 -> allow (recoverable and private)" allow \
   "$(decision_for "$(bash_cmd 'git branch -D release/1.2')" "$WORK")"
 check "[configured] branch -D release/1.2 -> ask (no longer private)" ask \
   "$(decision_for "$(bash_cmd 'git branch -D release/1.2')" "$WORK" "$BR")"
+
+# The lease-scoped cross-name push (section 7b) reads "shared" from the same
+# set, so configuring the destination withdraws that auto-approve too — a lease
+# proves the remote hasn't moved, never that the branch is the session's alone.
+check "[unset] leased rewrite of release/1.2 -> allow" allow \
+  "$(decision_for "$(push 'git push --force-with-lease=release/1.2 origin HEAD:release/1.2')" "$WORK")"
+check "[configured] leased rewrite of release/1.2 -> ask" ask \
+  "$(decision_for "$(push 'git push --force-with-lease=release/1.2 origin HEAD:release/1.2')" "$WORK" "$BR")"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 

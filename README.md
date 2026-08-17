@@ -74,6 +74,7 @@ the default `strict` [push policy](#push-guard).
 | `git add -A && git commit -m x && git push` *(feature branch)* | allow |
 | `git push` / `git push -u origin HEAD` *(worktree branch)* | allow |
 | `git push --force` *(worktree branch)* | allow |
+| `git push --force-with-lease=other origin HEAD:other` *(rewrites an unprotected branch, lease names the destination)* | allow |
 | `gh pr view 123` / `gh pr list` / `gh repo view` / `gh run watch` / `gh search prs` | allow |
 | `gh api repos/o/r` / `gh api -X GET …` *(a read — default or explicit GET)* | allow |
 | `git log \| head` / `gh pr checks 123 \| head -20` / `git diff --stat \| tail -n 5` *(piped to a read-only filter)* | allow |
@@ -93,7 +94,8 @@ the default `strict` [push policy](#push-guard).
 | editing a symlink in a gitignored dir that points at a tracked file, on `main` *(the write lands on branch contents)* | **ask** |
 | writing a new file into a directory that doesn't exist yet, on `main` *(`src/newdir/f.py`)* | **ask** |
 | `git push origin main` / `git push origin HEAD:main` | **ask** |
-| `git push origin other-branch` *(strict policy)* | **ask** |
+| `git push origin other-branch` *(strict policy — no lease naming the destination)* | **ask** |
+| `git push --force-with-lease=main origin HEAD:main` / `git push --delete --force-with-lease=other origin other` *(protected target; a deletion)* | **ask** |
 | `git push origin v1.3.0` / `git push origin refs/tags/v1.3.0` / `git push --tags` *(publishes a tag, strict policy)* | **ask** |
 | `git reset --hard HEAD~1` *(uncommitted changes to tracked files, or a tip nothing else reaches, or on `main`)* | **ask** |
 | `git clean -fd` | **ask** |
@@ -310,7 +312,7 @@ variable:
 
 | Policy | Behavior |
 | --- | --- |
-| `strict` *(default)* | **allow** a push of the worktree's own current branch, including a force push of it. **ask** before any other push — a *different* branch (`git push origin other`), foreign refspecs (`git push origin HEAD:other`), wildcards, `--all`/`--mirror`, a tag (`git push origin v1.3.0`, `refs/tags/v1.3.0`, `--tags`), or a protected target. |
+| `strict` *(default)* | **allow** a push of the worktree's own current branch, including a force push of it, and a *leased rewrite* of one other unprotected branch from it (see below). **ask** before any other push — a *different* branch (`git push origin other`), foreign refspecs (`git push origin HEAD:other`), wildcards, `--all`/`--mirror`, a tag (`git push origin v1.3.0`, `refs/tags/v1.3.0`, `--tags`), or a protected target. |
 | `protected` | **ask** before a push whose target is `main`/`master` (including `git push origin main`, `HEAD:main`, deleting `main`, and `--all`/`--mirror`). Any other push defers. Never auto-approves. |
 | `off` | Pushes are not guarded at all. |
 
@@ -330,6 +332,35 @@ usually the one step worth a human keystroke. One gap is deliberate:
 tags already reachable from the branch being pushed, and `push.followTags` can
 turn on the same behavior from config where the hook can't see it. Under
 `protected`, tag pushes defer as before — that policy only guards `main`/`master`.
+
+**Leased rewrites of another branch.** Undoing a bad rebase means rewriting one
+branch from another: fix it up on a scratch branch, then push that over the
+original. The destination is never the worktree branch, so under `strict` every
+spelling of it asked — and in a non-interactive mode an `ask` is a denial, so the
+branch could not be repaired at all.
+
+`--force-with-lease=<dst>` opens that path. git refuses the push unless the
+remote is still at the commit the command named, so it cannot land on top of work
+the session hasn't seen — the same reason the non-force `git branch` spellings
+need no check of their own. Under `strict`:
+
+```bash
+git push --force-with-lease=claude/topic origin HEAD:claude/topic
+```
+
+is auto-approved when the lease **names the destination**, the source is the
+worktree branch, and the destination isn't protected. Everything else still asks:
+a bare `--force-with-lease` (it names no ref), a lease naming some other branch,
+a deletion (`--delete`, or an empty source as in `origin :other`), a foreign
+source branch, and `--no-force-with-lease` cancelling an earlier lease. Under
+`protected` nothing changes — that policy never auto-approves a push.
+
+What a lease proves is that the remote hasn't moved, not that the branch is
+yours alone. Sharedness stays branch-guard's own question, answered by the
+protected set: `git push --force-with-lease=main origin HEAD:main` asks like any
+other push at `main`, and widening
+[`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration) withdraws the auto-approve
+for whatever you add.
 
 The push guard is **best-effort**: it parses the Bash command Claude runs (so it
 only governs Claude's `Bash` tool), and unusual refspecs may not be classified —
@@ -587,6 +618,8 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   rule still prompts on main/master.
 - **Push the worktree's own branch.** `git push` / `git push -u origin HEAD`
   auto-approves; pushing a different branch or a refspec like `HEAD:main` prompts.
+  To rewrite another unprotected branch from this one, name it in a lease —
+  `git push --force-with-lease=other origin HEAD:other`.
 - **Prefer fast-forward pulls on a protected branch.** On a feature branch a
   bare `git pull` is auto-approved. On `main` it prompts, because it lands a
   merge or rewrites history — `git pull --ff-only` is auto-approved there, since
@@ -671,6 +704,11 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   classified (it asks/defers rather than allowing). Auto-approval is a
   convenience layer, not a security boundary — for hard guarantees use a git
   `pre-push` hook and/or server-side branch protection.
+- A `--force-with-lease` rewrite of another branch is auto-approved on git's
+  guarantee that the remote hasn't moved, which says nothing about who else uses
+  that branch. Add anything shared to
+  [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration); a branch with an open PR
+  is not shared as far as the guard is concerned.
 - The [`git branch` recoverability check](#git-branch-what-the-session-owns-not-how-the-verb-looks)
   reads local refs only, so it trusts your last `git fetch`. A remote-tracking
   ref left stale after the branch was deleted upstream still counts as

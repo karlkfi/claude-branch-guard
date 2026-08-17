@@ -282,6 +282,15 @@ PURE_SUBSTITUTIONS = frozenset({
 PUSH_VALUE_OPTS = {'--repo', '-o', '--push-option', '--receive-pack', '--exec'}
 # `git push` flags that push more than the current branch.
 PUSH_MANY_FLAGS = {'--all', '--mirror', '--branches'}
+# `git push --force-with-lease=<dst>[:<expect>]` names the destination ref it is
+# willing to overwrite, and git refuses the push unless the remote is still at
+# the expected commit. That is the same shape of argument the non-force
+# `git branch` spellings rest on: git enforces the check, so branch-guard needn't
+# duplicate it. `--no-force-with-lease` cancels every lease given earlier on the
+# command line, so it clears the set rather than being ignored.
+FORCE_WITH_LEASE = '--force-with-lease'
+NO_FORCE_WITH_LEASE = '--no-force-with-lease'
+
 # `git push` flags that publish tags alongside (or instead of) a branch. `--tags`
 # pushes every local tag, including release tags unrelated to the worktree
 # branch, so under `strict` it asks like any other non-branch push.
@@ -292,7 +301,9 @@ PUSH_TAG_FLAGS = {'--tags'}
 
 # Push-guard policy (env var BRANCH_GUARD_PUSH_POLICY):
 #   strict (default) — auto-approve a push of the worktree's own current branch
-#                      (including force pushes); ask before any other push
+#                      (including force pushes), and a rewrite of one other
+#                      unprotected branch from it under an explicit
+#                      `--force-with-lease=<dst>`; ask before any other push
 #                      (other branches, foreign refspecs like HEAD:main,
 #                      wildcards, --all/--mirror, tags via --tags or an explicit
 #                      refs/tags/… refspec, or a protected target).
@@ -749,13 +760,29 @@ def parse_refspec(spec, current, delete):
     return (src_b, dst_b, src_glob or dst_glob, dst_other or src_other)
 
 
+def lease_target(token, current):
+    """The destination branch named by a `--force-with-lease=<ref>[:<expect>]`
+    token, or None for anything else — including the bare `--force-with-lease`,
+    which names no ref and so can't mark one destination as deliberate. The ref
+    is mapped through `ref_to_branch`, so the short and fully-qualified
+    spellings agree; a wildcard or a non-branch ref names no branch."""
+    prefix = FORCE_WITH_LEASE + '='
+    if not token.startswith(prefix):
+        return None
+    branch, glob, other = ref_to_branch(token[len(prefix):].split(':', 1)[0], current)
+    return None if glob or other is not None else branch
+
+
 def push_decision(args, current, policy):
     """Given the tokens after `push`, the worktree's current branch, and the
     policy, return (decision, reason) where decision is 'allow', 'ask', or None
-    (defer). strict auto-approves a push of the worktree branch (incl. force);
-    protected only asks on a protected target. Leans toward asking (strict) /
-    deferring (protected) on parsing uncertainty, never toward allowing."""
+    (defer). strict auto-approves a push of the worktree branch (incl. force),
+    and a rewrite of one other unprotected branch from it when an explicit
+    `--force-with-lease=<dst>` names that destination; protected only asks on a
+    protected target. Leans toward asking (strict) / deferring (protected) on
+    parsing uncertainty, never toward allowing."""
     positionals, many, tags, delete, i = [], False, False, False, 0
+    leased = set()
     while i < len(args):
         t = args[i]
         if t == '--':
@@ -768,6 +795,11 @@ def push_decision(args, current, policy):
                 tags = True
             if t in ('--delete', '-d'):
                 delete = True
+            if t == NO_FORCE_WITH_LEASE:
+                leased.clear()
+            target = lease_target(t, current)
+            if target is not None:
+                leased.add(target)
             i += 2 if t in PUSH_VALUE_OPTS else 1
             continue
         positionals.append(t)
@@ -796,7 +828,22 @@ def push_decision(args, current, policy):
             if other is not None:
                 return ('ask', f"Push targets '{other}', a tag or other non-branch ref "
                                f"rather than the worktree branch '{current}'")
-            if dst_b is not None and dst_b != current:
+            # A rewrite of the destination under an explicit lease is the one
+            # cross-name push that carries its own proof. `--force-with-lease`
+            # makes git abort unless the remote is still at the commit the
+            # command named, so it can't clobber work the session hasn't seen —
+            # the same "git already enforces it" argument the non-force
+            # `git branch` spellings rest on. What a lease does NOT establish is
+            # that the destination is unshared; that stays branch-guard's own
+            # question, answered by the `is_protected(dst_b)` check above, which
+            # runs first and no lease can reach past. Requiring the lease to
+            # NAME the destination makes the cross-name push state its target
+            # twice, so a mistyped refspec still asks. A deletion is excluded:
+            # the lease bounds what the remote is when the ref goes, not whether
+            # removing it is in bounds.
+            leased_rewrite = (not delete and src_b == current
+                              and dst_b in leased)
+            if dst_b is not None and dst_b != current and not leased_rewrite:
                 return ('ask', f"Push targets '{dst_b}', not the worktree branch '{current}'")
             if src_b is not None and src_b != current:
                 return ('ask', f"Push sends local branch '{src_b}', not the worktree branch '{current}'")
