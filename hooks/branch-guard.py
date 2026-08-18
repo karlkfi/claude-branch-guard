@@ -165,8 +165,8 @@ RECOVERY_REF_PATTERNS = ('refs/remotes', 'refs/heads/main', 'refs/heads/master')
 RECOVERY_REV_ARGS = ('--remotes', 'refs/heads/main', 'refs/heads/master')
 
 # How many orphaned commits `orphans_only_reproducible_merges` will examine.
-# Each costs two more git processes on top of the rev-list, against Claude
-# Code's 10s budget for the whole hook. The case the check exists for — a
+# Each costs two more git processes on top of the rev-list, against the hook
+# timeout in hooks/hooks.json. The case the check exists for — a
 # scratch branch carrying one test-merge — sits at the bottom of that range, so
 # a low cap costs nothing real and a longer orphan list keeps asking.
 MAX_EXAMINED_ORPHANS = 4
