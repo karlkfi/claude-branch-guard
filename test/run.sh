@@ -296,8 +296,8 @@ check "edit non-ignored path on main -> ask" ask \
   "$(decision_for "$(edit_payload Edit file_path "$WORK/file.txt")" "$REPO_ROOT")"
 #     The skip must not fire where no human could answer it either way — an
 #     ignored path defers rather than denying under a non-interactive mode.
-check "[auto] edit gitignored path on main -> none" none \
-  "$(decision_for "$(edit_payload Write file_path "$WORK/tmp/scratch.json" "" auto)" "$REPO_ROOT")"
+check "[dontAsk] edit gitignored path on main -> none" none \
+  "$(decision_for "$(edit_payload Write file_path "$WORK/tmp/scratch.json" "" dontAsk)" "$REPO_ROOT")"
 
 # 5e. The probe must answer about the file the write LANDS on. A symlink inside
 #     an ignored dir is itself ignored, but its target need not be — so probing
@@ -467,12 +467,12 @@ check "[default=strict] --no-force-with-lease cancels the lease -> ask" ask \
 # A lease naming a non-branch ref names no destination branch (section 7a).
 check "[default=strict] lease on a tag ref -> ask" ask \
   "$(decision_for "$(push 'git push --force-with-lease=refs/tags/v1 origin HEAD:refs/tags/v1')" "$WORK")"
-# The whole point of the relaxation is auto mode, where the ask it replaces was
-# a deny with no way to answer it — so pin both halves under 'auto'.
-check "[auto] leased rewrite of another branch -> allow" allow \
-  "$(decision_for "$(push_mode 'git push --force-with-lease=other origin HEAD:other' 'auto')" "$WORK")"
-check "[auto] cross-name push without a lease -> deny" deny \
-  "$(decision_for "$(push_mode 'git push origin HEAD:other' 'auto')" "$WORK")"
+# The relaxation earns the most where the ask it replaces cannot be answered at
+# all — so pin both halves under a mode that denies.
+check "[dontAsk] leased rewrite of another branch -> allow" allow \
+  "$(decision_for "$(push_mode 'git push --force-with-lease=other origin HEAD:other' 'dontAsk')" "$WORK")"
+check "[dontAsk] cross-name push without a lease -> deny" deny \
+  "$(decision_for "$(push_mode 'git push origin HEAD:other' 'dontAsk')" "$WORK")"
 # `protected` never auto-approves, so the lease must not leak a push into it.
 check "[protected] leased rewrite of another branch -> none" none \
   "$(decision_for "$(push 'git push --force-with-lease=other origin HEAD:other')" "$WORK" "$PROT")"
@@ -499,20 +499,41 @@ check "[protected] push --tags -> none" none \
 check "[off] push origin main -> none" none \
   "$(decision_for "$(push 'git push origin main')" "$WORK" "$OFF")"
 
-# 10. non-interactive ('auto') modes: a would-be ask becomes deny (fail safe),
-#     while allow and defer are unaffected.
-check "[auto] push origin main -> deny" deny \
-  "$(decision_for "$(push_mode 'git push origin main' 'auto')" "$WORK")"
+# 10. non-interactive modes: a would-be ask becomes deny (fail safe), while
+#     allow and defer are unaffected. `auto` is NOT one of them — its prompts
+#     reach a human, so it asks — and every fixture below pairs the two so the
+#     mode is pinned as the cause rather than the command.
+check "[dontAsk] push origin main -> deny" deny \
+  "$(decision_for "$(push_mode 'git push origin main' 'dontAsk')" "$WORK")"
 check "[bypassPermissions] push origin main -> deny" deny \
   "$(decision_for "$(push_mode 'git push origin main' 'bypassPermissions')" "$WORK")"
-check "[auto] worktree-branch push -> allow (unchanged)" allow \
-  "$(decision_for "$(push_mode 'git push' 'auto')" "$WORK")"
+check "[auto] push origin main -> ask (human present)" ask \
+  "$(decision_for "$(push_mode 'git push origin main' 'auto')" "$WORK")"
+check "[dontAsk] worktree-branch push -> allow (unchanged)" allow \
+  "$(decision_for "$(push_mode 'git push' 'dontAsk')" "$WORK")"
 check "[acceptEdits] push origin main -> ask (human present)" ask \
   "$(decision_for "$(push_mode 'git push origin main' 'acceptEdits')" "$WORK")"
 
+# 10a. Publishing a release from a session is the case that motivated treating
+#      `auto` as interactive (#33): the tag is created locally, and under the
+#      old set neither of the two steps that publish it could be approved, so a
+#      release always finished in the user's terminal. Both ask now, and both
+#      still deny where nobody can answer.
+check "[auto] tag push -> ask" ask \
+  "$(decision_for "$(push_mode 'git push origin v1.3.0' 'auto')" "$WORK")"
+check "[dontAsk] tag push -> deny" deny \
+  "$(decision_for "$(push_mode 'git push origin v1.3.0' 'dontAsk')" "$WORK")"
+check "[auto] push --tags -> ask" ask \
+  "$(decision_for "$(push_mode 'git push origin HEAD:main --tags' 'auto')" "$WORK")"
+# Creating the tag was never gated; pinned so the fix isn't credited to it.
+check "[auto] git tag -a -> allow (never gated)" allow \
+  "$(decision_for "$(push_mode 'git tag -a v1.3.0 -m v1.3.0' 'auto')" "$WORK")"
+
 # 11. non-interactive mode also converts a commit-on-protected ask to deny.
 git -C "$WORK" checkout -q main
-check "[auto] commit on main -> deny" deny \
+check "[dontAsk] commit on main -> deny" deny \
+  "$(decision_for "$(push_mode 'git commit -m x' 'dontAsk')" "$WORK")"
+check "[auto] commit on main -> ask" ask \
   "$(decision_for "$(push_mode 'git commit -m x' 'auto')" "$WORK")"
 git -C "$WORK" checkout -q claude/x
 
@@ -525,20 +546,27 @@ check_text "[default] tag push reason states the cause" has \
 check_text "[default] tag push reason invites confirmation" has \
   "— confirm before proceeding." "$tag_ask"
 
-tag_deny="$(reason_for "$(push_mode 'git push origin v1.3.0' 'auto')" "$WORK")"
-check_text "[auto] tag push deny keeps the cause" has \
+tag_deny="$(reason_for "$(push_mode 'git push origin v1.3.0' 'dontAsk')" "$WORK")"
+check_text "[dontAsk] tag push deny keeps the cause" has \
   "Push targets 'v1.3.0', not the worktree branch 'claude/x'" "$tag_deny"
-check_text "[auto] tag push deny is not confirm-shaped" lacks \
+check_text "[dontAsk] tag push deny is not confirm-shaped" lacks \
   "confirm before proceeding" "$tag_deny"
-check_text "[auto] tag push deny names the mode" has "permission mode 'auto'" "$tag_deny"
-check_text "[auto] tag push deny says retrying won't help" has \
+check_text "[dontAsk] tag push deny names the mode" has "permission mode 'dontAsk'" "$tag_deny"
+check_text "[dontAsk] tag push deny says retrying won't help" has \
   "Retrying won't help" "$tag_deny"
+# The mode is named from the payload, not hardcoded — so the denial a session
+# actually reads points at the mode that session is in.
+check_text "[bypassPermissions] tag push deny names its own mode" has \
+  "permission mode 'bypassPermissions'" \
+  "$(reason_for "$(push_mode 'git push origin v1.3.0' 'bypassPermissions')" "$WORK")"
 
 # The same wording split applies to every ask site, not just pushes.
 git -C "$WORK" checkout -q main
-check_text "[auto] commit-on-main deny is not confirm-shaped" lacks "confirm before proceeding" \
-  "$(reason_for "$(push_mode 'git commit -m x' 'auto')" "$WORK")"
-check_text "[auto] edit-on-main deny is not confirm-shaped" lacks "confirm before proceeding" \
+check_text "[dontAsk] commit-on-main deny is not confirm-shaped" lacks "confirm before proceeding" \
+  "$(reason_for "$(push_mode 'git commit -m x' 'dontAsk')" "$WORK")"
+check_text "[dontAsk] edit-on-main deny is not confirm-shaped" lacks "confirm before proceeding" \
+  "$(reason_for "$(edit_payload Edit file_path "$WORK/file.txt" "" dontAsk)" "$WORK")"
+check_text "[auto] edit-on-main ask invites confirmation" has "— confirm before proceeding." \
   "$(reason_for "$(edit_payload Edit file_path "$WORK/file.txt" "" auto)" "$WORK")"
 check_text "[default] edit-on-main ask invites confirmation" has "— confirm before proceeding." \
   "$(reason_for "$(edit_payload Edit file_path "$WORK/file.txt" "" default)" "$WORK")"
@@ -586,8 +614,8 @@ check "git checkout <ambiguous> -> none (defer)" none \
 printf 'dirty\n' >> "$WORK/file.txt"
 check "git reset --hard, dirty worktree -> ask" ask \
   "$(decision_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK")"
-check "[auto] git reset --hard, dirty worktree -> deny" deny \
-  "$(decision_for "$(push_mode 'git reset --hard' 'auto')" "$WORK")"
+check "[dontAsk] git reset --hard, dirty worktree -> deny" deny \
+  "$(decision_for "$(push_mode 'git reset --hard' 'dontAsk')" "$WORK")"
 git -C "$WORK" checkout -q -- file.txt
 check "git reset --hard, clean worktree on a recoverable branch -> allow" allow \
   "$(decision_for "$(bash_cmd 'git reset --hard HEAD~1')" "$WORK")"
@@ -676,8 +704,8 @@ check "git stash drop on main -> ask (still discards a stash)" ask \
 git -C "$WORK" checkout -q claude/x
 check "readonly + destructive chain -> ask" ask \
   "$(decision_for "$(bash_cmd 'git status && git clean -fd')" "$WORK")"
-check "[auto] git clean -fd -> deny" deny \
-  "$(decision_for "$(push_mode 'git clean -fd' 'auto')" "$WORK")"
+check "[dontAsk] git clean -fd -> deny" deny \
+  "$(decision_for "$(push_mode 'git clean -fd' 'dontAsk')" "$WORK")"
 
 # 15. Branch-sensitive mutations: feature -> allow, protected -> ask.
 check "git rebase on feature -> allow" allow \
@@ -1217,8 +1245,8 @@ check "[configured] git branch -D a scratch test-merge -> ask" ask \
      'BRANCH_GUARD_PROTECTED_BRANCHES=testmerge')"
 #     The unattended mode is what the widening exists for: the reported session
 #     had no way to answer. Its other half is the `-D orphan` deny below.
-check "[auto] git branch -D a scratch test-merge -> allow" allow \
-  "$(decision_for "$(push_mode 'git branch -D testmerge' 'auto')" "$WORK")"
+check "[dontAsk] git branch -D a scratch test-merge -> allow" allow \
+  "$(decision_for "$(push_mode 'git branch -D testmerge' 'dontAsk')" "$WORK")"
 
 #     Force move/copy: creating a new ref loses nothing; moving an existing one
 #     depends on whether its CURRENT tip survives elsewhere.
@@ -1250,8 +1278,8 @@ check "git -C other-repo branch -D -> ask" ask \
 #     Listing is untouched, and the unattended fail-safe still applies.
 check "git branch --list -> allow" allow \
   "$(decision_for "$(bash_cmd 'git branch -a -v')" "$WORK")"
-check "[auto] git branch -D irrecoverable -> deny" deny \
-  "$(decision_for "$(push_mode 'git branch -D orphan' 'auto')" "$WORK")"
+check "[dontAsk] git branch -D irrecoverable -> deny" deny \
+  "$(decision_for "$(push_mode 'git branch -D orphan' 'dontAsk')" "$WORK")"
 
 #     Wording: the reason has to say what is actually happening. `git branch -f`
 #     creating a ref was reported as "Deleting/renaming a git branch", which is
@@ -1326,8 +1354,8 @@ check "[protected] push origin release/1.2 -> none (unset)" none \
 check "[protected+configured] push origin release/1.2 -> ask" ask \
   "$(decision_for "$(push 'git push origin release/1.2')" "$WORK" "$PROT" "$BR")"
 # And a configured ask still becomes a deny where no human can answer.
-check "[protected+configured][auto] push origin integration -> deny" deny \
-  "$(decision_for "$(push_mode 'git push origin integration' 'auto')" "$WORK" "$PROT" "$BR")"
+check "[protected+configured][dontAsk] push origin integration -> deny" deny \
+  "$(decision_for "$(push_mode 'git push origin integration' 'dontAsk')" "$WORK" "$PROT" "$BR")"
 
 # `git branch`'s ownership tier (section 24) calls a target in bounds only when
 # it is recoverable AND private, and reads "private" from `is_protected` — so
@@ -1369,12 +1397,16 @@ check "restore --worktree, no override -> ask" ask \
   "$(decision_for "$(bash_payload 'git restore file.txt')" "$WORK")"
 check "restore --worktree, overridden -> allow" allow \
   "$(decision_for "$(bash_payload "$OVR git restore file.txt")" "$WORK")"
-#     The pair the relaxation exists for: in auto mode the bare form is a deny
-#     with no route forward, and the prefixed one goes through.
-check "[auto] restore --worktree, no override -> deny" deny \
+#     The pair the relaxation exists for: where no human can answer, the bare
+#     form is a deny with no route forward and the prefixed one goes through.
+#     `auto` is no longer such a mode — it prompts — so this pins `dontAsk`,
+#     with the `auto` ask beside it as the control.
+check "[dontAsk] restore --worktree, no override -> deny" deny \
+  "$(decision_for "$(bash_mode 'git restore file.txt' dontAsk)" "$WORK")"
+check "[dontAsk] restore --worktree, overridden -> allow" allow \
+  "$(decision_for "$(bash_mode "$OVR git restore file.txt" dontAsk)" "$WORK")"
+check "[auto] restore --worktree, no override -> ask" ask \
   "$(decision_for "$(bash_mode 'git restore file.txt' auto)" "$WORK")"
-check "[auto] restore --worktree, overridden -> allow" allow \
-  "$(decision_for "$(bash_mode "$OVR git restore file.txt" auto)" "$WORK")"
 
 #     The approval stays on the record: the cause and the stated reason both
 #     survive into the emitted decision, so an allow is never anonymous.
@@ -1390,8 +1422,11 @@ check_text "override allow echoes the reason given" has \
 #     denial rather than rerouting onto an ungated hand-edit. The interactive
 #     ask does not: a human answering the prompt is the shorter path, and
 #     advertising a bypass beside it is the wrong nudge.
-check_text "[auto] liftable deny names the prefix" has \
+check_text "[dontAsk] liftable deny names the prefix" has \
   'BRANCH_GUARD_OVERRIDE=<reason>' \
+  "$(reason_for "$(bash_mode 'git restore file.txt' dontAsk)" "$WORK")"
+check_text "[auto] liftable ask does not name the prefix" lacks \
+  'BRANCH_GUARD_OVERRIDE' \
   "$(reason_for "$(bash_mode 'git restore file.txt' auto)" "$WORK")"
 check_text "interactive ask does not name the prefix" lacks \
   'BRANCH_GUARD_OVERRIDE' \
@@ -1425,9 +1460,9 @@ check "override on gh pr close --delete-branch -> ask" ask \
 check "override on gh api DELETE of a ref -> ask" ask \
   "$(decision_for "$(bash_payload "$OVR gh api -X DELETE repos/o/r/git/refs/heads/x")" "$WORK")"
 #     A push's deny must not advertise a prefix that would be refused again.
-check_text "[auto] unliftable deny stays silent about the prefix" lacks \
+check_text "[dontAsk] unliftable deny stays silent about the prefix" lacks \
   'BRANCH_GUARD_OVERRIDE' \
-  "$(reason_for "$(bash_mode 'git push origin other' auto)" "$WORK")"
+  "$(reason_for "$(bash_mode 'git push origin other' dontAsk)" "$WORK")"
 
 #     26e. Lock two: an `ask-shared` verdict — the cause is a protected branch —
 #     is unliftable even for a subcommand that is otherwise in bounds. This is
@@ -1436,8 +1471,8 @@ check_text "[auto] unliftable deny stays silent about the prefix" lacks \
 git -C "$WORK" checkout -q main
 check "override on reset --hard on main -> ask" ask \
   "$(decision_for "$(bash_payload "$OVR git reset --hard HEAD~1")" "$WORK")"
-check "[auto] override on reset --hard on main -> deny" deny \
-  "$(decision_for "$(bash_mode "$OVR git reset --hard HEAD~1" auto)" "$WORK")"
+check "[dontAsk] override on reset --hard on main -> deny" deny \
+  "$(decision_for "$(bash_mode "$OVR git reset --hard HEAD~1" dontAsk)" "$WORK")"
 git -C "$WORK" checkout -q claude/x
 check "override on branch -D main -> ask" ask \
   "$(decision_for "$(bash_payload "$OVR git branch -D main")" "$WORK")"

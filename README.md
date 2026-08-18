@@ -42,7 +42,7 @@ The hook produces one of three outcomes per command:
 
 - **allow** — the command runs without a prompt.
 - **ask** — Claude Code shows its standard permission prompt. You approve or
-  reject. In a non-interactive mode this becomes **deny** (see
+  reject. In a mode with no prompt to show, this becomes **deny** (see
   [Configuration](#configuration)).
 - **defer** — the hook stays silent; your normal permission settings apply.
 
@@ -290,10 +290,11 @@ delimiter (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) suppresses all expansion, so its body
 is inert and always safe to drop. An unterminated or unparseable heredoc is left
 unchanged (the body lexes and the command defers) rather than guessed at.
 
-The **ask** rows assume an interactive or `default`-mode session. In a
-non-interactive mode (`auto`, `dontAsk`, `bypassPermissions`) the same commands
-return **deny** — equally blocking, with recoverable feedback for the agent
-instead of a prompt no one can answer. See [Configuration](#configuration).
+The **ask** rows assume a session where a prompt can be answered, which
+includes `auto`. In a mode where none can (`dontAsk`, `bypassPermissions`) the
+same commands return **deny** — equally blocking, with recoverable feedback for
+the agent instead of a prompt no one can answer. See
+[Configuration](#configuration).
 
 The two paths share the cause and differ in what they offer, so a denial is never
 mistaken for a prompt that is waiting to be answered:
@@ -303,8 +304,8 @@ ask   Push targets 'v1.3.0', not the worktree branch 'claude/x'
       — confirm before proceeding.
 
 deny  Push targets 'v1.3.0', not the worktree branch 'claude/x'
-      — branch-guard denied it: permission mode 'auto' has no way to prompt for
-      confirmation. Retrying won't help — either do it outside this session
+      — branch-guard denied it: permission mode 'dontAsk' has no way to prompt
+      for confirmation. Retrying won't help — either do it outside this session
       (e.g. run the command in a terminal), or re-run in an interactive
       permission mode.
 ```
@@ -335,13 +336,16 @@ genuinely ignored file stays exempt.
 
 ## Break-glass: `BRANCH_GUARD_OVERRIDE`
 
-In a non-interactive mode an **ask** becomes a **deny**, and a deny has no answer.
-That is right for a shared branch and wrong for a scratch one: the session still
-has work to do, so it does the work some other way. A session that couldn't run
-`git restore file.txt` edited the file back to its `HEAD` content by hand instead
-— same end state, no atomicity, no guarantee the result matched `HEAD`, and
-nothing in the log to review. Where no ungated equivalent exists (you cannot
-delete a branch by editing a file), the state is simply stranded.
+In `dontAsk` and `bypassPermissions` an **ask** becomes a **deny**, and a deny
+has no answer. That is right for a shared branch and wrong for a scratch one: the
+session still has work to do, so it does the work some other way. A session that
+couldn't run `git restore file.txt` edited the file back to its `HEAD` content by
+hand instead — same end state, no atomicity, no guarantee the result matched
+`HEAD`, and nothing in the log to review. Where no ungated equivalent exists (you
+cannot delete a branch by editing a file), the state is simply stranded.
+
+That session was in `auto`, which prompts now — so that example no longer plays
+out there. The prefix is for the modes that still cannot prompt.
 
 So one command prefix lifts an ask whose damage cannot leave this machine:
 
@@ -406,7 +410,9 @@ can widen with [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration), so
 **Tags.** Publishing a tag isn't a push of the worktree branch, so under `strict`
 it asks — whichever way it's spelled (`git push origin v1.3.0`,
 `git push origin refs/tags/v1.3.0`, `git push --tags`). Cutting a release is
-usually the one step worth a human keystroke. One gap is deliberate:
+usually the one step worth a human keystroke, and `auto` gives you one rather
+than a dead end (see [Configuration](#configuration)); creating the tag was
+never gated at all. One gap is deliberate:
 `git push --follow-tags` stays auto-approved, since it publishes only annotated
 tags already reachable from the branch being pushed, and `push.followTags` can
 turn on the same behavior from config where the hook can't see it. Under
@@ -670,10 +676,10 @@ update step and restart.
    provably pure substitutions (`$(git rev-parse --show-toplevel)`,
    `$(git branch --show-current)`, `$(pwd)`) is exempt from that second downgrade
    — matched structurally, so only the exact read-only command qualifies.
-6. **Fail safe** in non-interactive modes: a would-be `ask` is emitted as `deny`,
-   since no human is present to answer the prompt. The reason names the mode and
-   says retrying won't help, so the agent hands off instead of re-running a
-   command that can't be approved from the session.
+6. **Fail safe** where no prompt can be shown (`dontAsk`, `bypassPermissions`):
+   a would-be `ask` is emitted as `deny`, since no human is present to answer it.
+   The reason names the mode and says retrying won't help, so the agent hands off
+   instead of re-running a command that can't be approved from the session.
 
 ## Agent guidance: avoiding prompts
 
@@ -758,9 +764,9 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   commits and branch-sensitive mutations, the `Edit`/`Write` check, and the push
   guard's protected-target rule under both `strict` and `protected`.
 
-- **Non-interactive modes** — in `auto`, `dontAsk`, and `bypassPermissions` an
-  `ask` is automatically emitted as `deny` so the guard fails safe when no human
-  is present. The denial says so plainly (see [Behavior](#behavior)): there is no
+- **Non-interactive modes** — in `dontAsk` and `bypassPermissions` an `ask` is
+  automatically emitted as `deny` so the guard fails safe when no human is
+  present. The denial says so plainly (see [Behavior](#behavior)): there is no
   confirmation to grant in this mode, so the way through is to run the command
   yourself, re-run the session interactively, or — for the narrow set of asks it
   covers — use the
@@ -768,6 +774,12 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   (Claude Code ignores hook decisions entirely under `bypassPermissions`, so a
   hard guarantee there still needs a git `pre-push` hook or server-side branch
   protection.)
+
+  **`auto` is not one of them.** The name suggests an unattended session and it
+  usually isn't one: an `ask` in `auto` reaches a real prompt, which somebody
+  answers. Denying it there removed the human rather than protecting them — a
+  session could create an annotated release tag and then never publish it, so
+  tagging always finished in a terminal instead.
 
 - **Break-glass** — `BRANCH_GUARD_OVERRIDE=<reason>` as a command prefix lifts an
   ask whose damage stops at this machine. It is deliberately *not* a

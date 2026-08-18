@@ -55,13 +55,14 @@ parsing uncertainty (unbalanced quotes, empty input, unresolvable branch,
 unknown subcommand) it defers silently so normal permissions apply — never
 fail closed.
 
-In a non-interactive permission mode (auto / dontAsk / bypassPermissions) there
-is no human to answer a prompt, so a would-be `ask` is emitted as `deny`
-instead — the guard fails safe. (`bypassPermissions` ignores hook decisions
-entirely, but emitting `deny` there is harmless and future-proof.) A classifier
-reason states only the CAUSE; `confirm()` adds the closing clause, so the two
-paths read honestly — an `ask` offers a confirmation, a `deny` says there is
-none to be had and points at the terminal instead.
+In a non-interactive permission mode (dontAsk / bypassPermissions) there is no
+human to answer a prompt, so a would-be `ask` is emitted as `deny` instead — the
+guard fails safe. (`bypassPermissions` ignores hook decisions entirely, but
+emitting `deny` there is harmless and future-proof.) `auto` is not one of these:
+its prompts do reach a human, so it asks — see NON_INTERACTIVE_MODES. A
+classifier reason states only the CAUSE; `confirm()` adds the closing clause, so
+the two paths read honestly — an `ask` offers a confirmation, a `deny` says
+there is none to be had and points at the terminal instead.
 
 That denial is final, which is a dead end for a command the session had a good
 reason to run: with nothing to answer the prompt, work reroutes onto whatever
@@ -341,7 +342,17 @@ PUSH_POLICIES = ('off', 'protected', 'strict')
 # Permission modes with no human present to answer a prompt; a would-be `ask`
 # is converted to `deny` so the guard fails safe. Defined as a set so unknown /
 # version-specific mode names simply don't match.
-NON_INTERACTIVE_MODES = frozenset({'auto', 'dontAsk', 'bypassPermissions'})
+#
+# `auto` is deliberately absent. The name reads as unattended, and it isn't: an
+# `ask` in `auto` reaches a real prompt that a human answers, which is why
+# workspace-guard (measured on 1.10.0) treats `bypassPermissions` alone as
+# human-free. Converting it here removed the human instead of protecting them —
+# a release could create an annotated tag and then never publish it, so tagging
+# fell back to the user's terminal every time (#33), and the same dead end sent
+# a session hand-editing a file back to its HEAD content rather than running the
+# `git restore` it had been denied (#78). A mode where nobody can answer still
+# denies; `auto` asks.
+NON_INTERACTIVE_MODES = frozenset({'dontAsk', 'bypassPermissions'})
 
 # Break-glass command prefix: `BRANCH_GUARD_OVERRIDE=<reason> git clean -fd`.
 # Read from the COMMAND STRING, not the hook process environment, because that
