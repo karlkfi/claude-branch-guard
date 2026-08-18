@@ -47,6 +47,12 @@ Also guards file edits (Edit/Write/MultiEdit/NotebookEdit) against the branch of
 the file's own repository — except for a gitignored path, which holds no branch
 contents to protect (`path_is_ignored`) — and `git push` according to
 BRANCH_GUARD_PUSH_POLICY.
+
+A push the policy would auto-approve is checked once more, for whether the base
+has moved into the same LINES this branch edits (`push_overlap`). It is in bounds
+either way; it is also going to merge wrong, so the auto-approve is withdrawn and
+the push asks for a rebase instead. Every probe there fails silent, so a stale
+fetch or a shallow clone costs a missed catch rather than a blocked push.
 The protected set is `main`/`master` plus any glob patterns in
 BRANCH_GUARD_PROTECTED_BRANCHES (see `protected_patterns`).
 
@@ -338,6 +344,77 @@ PUSH_TAG_FLAGS = {'--tags'}
 #                      defer. Never auto-approves a push.
 #   off              — don't guard pushes at all.
 PUSH_POLICIES = ('off', 'protected', 'strict')
+
+# --- Push overlap ----------------------------------------------------------
+# A push is auto-approved under `strict` when it targets the worktree's own
+# branch. That says the push is in bounds; it says nothing about whether the
+# branch is still built on what it thinks it is. When the base has moved into
+# the same LINES this branch edits, the merge is going to come out wrong — a
+# merge queue validates the candidate, kicks the entry back, and a whole check
+# cycle is spent finding what `git rebase` finds locally in seconds. So the
+# overlap withdraws the auto-approve and asks.
+#
+# Ported from pipe-guard, where the check shipped first (its PR #15) on the
+# argument that it reused a shell parse pipe-guard already had. branch-guard
+# parses push to destination-ref depth, which is deeper, so the check sits here
+# and pipe-guard's `gh pr create` half stays there.
+#
+# Everything below shells out and everything below fails SILENT: a probe that
+# can't answer returns None or [] and the push keeps whatever verdict it
+# already had. A missed catch is the acceptable failure; a push blocked because
+# git was slow is not.
+
+# Set to a FALSE_VALUES spelling to disable the check. Anything else — including
+# unset, empty, and a value nobody meant as false — leaves it on, so the default
+# direction is more friction rather than less. That polarity is deliberate: the
+# check only ever withdraws an auto-approve, never adds a prompt where
+# branch-guard was previously silent, so a misread value costs a prompt somebody
+# can answer rather than a guard that quietly stopped running.
+PUSH_OVERLAP_ENABLED_ENV = 'BRANCH_GUARD_PUSH_OVERLAP_ENABLED'
+FALSE_VALUES = frozenset({'false', '0', 'no', 'off'})
+
+# The integration ref this branch is compared against. Unset derives it from
+# `origin/HEAD` (so a `master`-default repo needs no config), falling back to
+# BASE_REF_FALLBACK when the clone never set that symref.
+BASE_REF_ENV = 'BRANCH_GUARD_BASE_REF'
+BASE_REF_FALLBACK = 'origin/main'
+
+# Comma-separated globs for paths whose overlap is expected — a file a custom
+# merge driver owns, which nearly every branch edits, would otherwise fire on
+# every push. Discounting one is CONDITIONAL: the path still counts when
+# `git merge-tree` says the merge genuinely conflicts there.
+OVERLAP_IGNORE_ENV = 'BRANCH_GUARD_OVERLAP_IGNORE'
+
+# Comma-separated globs naming release branches, which are cut from the base and
+# left diverged on purpose — telling one to rebase would publish everything
+# merged since the tag, which is a wrong answer rather than a noisy one. Nothing
+# in the commit graph separates a release branch from a stale topic branch (both
+# sit behind the base and ahead of the fork point), so the name is the only
+# signal there is. EXTENDS the defaults like PROTECTED_BRANCHES_ENV, keeping one
+# idiom for every glob list here; an over-broad pattern only ever skips the
+# check, which costs a missed catch and never a prompt.
+RELEASE_BRANCHES_ENV = 'BRANCH_GUARD_RELEASE_BRANCHES'
+DEFAULT_RELEASE_BRANCHES = (
+    'release/*', 'release-*', 'rel/*', 'rel-*',
+    'stable/*', 'stable-*', 'maint/*', 'maint-*',
+    'maintenance/*', 'maintenance-*', 'hotfix/*', 'hotfix-*',
+    '[0-9]*.[0-9]*', 'v[0-9]*.[0-9]*',
+)
+
+# `git push` flags that land nothing on the base, so there is no overlap to
+# have. Long spellings and the bundled short letters (`-n`, `-d`) both, since
+# force is read from the whole flag set everywhere else here too.
+PUSH_OVERLAP_SKIP_FLAGS = frozenset({'--dry-run', '--delete'})
+PUSH_OVERLAP_SKIP_LETTERS = frozenset({'n', 'd'})
+
+# Lines of context a diff hunk carries either side. Stated once here: the diffs
+# are fetched with `-U0` so a hunk covers only the lines that moved, and
+# `hunk_range` widens each by this much. Edits within six lines of each other
+# therefore meet, and edits seven apart do not.
+CONTEXT_LINES = 3
+
+# The pre-image half of a unified-diff hunk header (`@@ -12,3 +12,4 @@`).
+HUNK_RE = re.compile(r'^@@ -([0-9]+)(?:,([0-9]+))? \+')
 
 # Permission modes with no human present to answer a prompt; a would-be `ask`
 # is converted to `deny` so the guard fails safe. Defined as a set so unknown /
@@ -921,6 +998,187 @@ def push_policy():
     return v if v in PUSH_POLICIES else 'strict'
 
 
+def hunk_range(start, count):
+    """A hunk's pre-image span, widened by the context git carries either side.
+
+    `-a,0` is an insertion after line <a> covering no pre-image line of its own.
+    It still collides with an edit beside it, so it spans that one line."""
+    last = start + count - 1 if count else start
+    return (max(1, start - CONTEXT_LINES), last + CONTEXT_LINES)
+
+
+def parse_hunks(diff):
+    """{path: [(start, end)]} from a unified diff, in PRE-IMAGE line numbers.
+
+    The pre-image side is what makes two diffs comparable: taken from a shared
+    ancestor, both sides' `-` ranges are numbered in that ancestor. Post-image
+    numbers are each side's own and mean nothing to the other.
+
+    A `--- ` line names a file only inside a header run, because a removed line
+    carries a `-` of its own — an SQL comment `-- DROP` comes out of the diff as
+    `--- DROP` and is content, not a header. `@@` needs no such guard: a removed
+    hunk header is prefixed too, and a context line starts with a space."""
+    ranges, path, in_header = {}, '', False
+    for line in diff.splitlines():
+        if line.startswith('diff --git '):
+            path, in_header = '', True
+            continue
+        if in_header and line.startswith('--- '):
+            path = '' if line == '--- /dev/null' else line[6:]
+            continue
+        if not path:
+            continue
+        m = HUNK_RE.match(line)
+        if m:
+            in_header = False
+            ranges.setdefault(path, []).append(
+                hunk_range(int(m.group(1)),
+                           1 if m.group(2) is None else int(m.group(2))))
+    return ranges
+
+
+def changed_ranges(cwd, old, new):
+    """What changed between two revisions, as {path: [(start, end)]}, or None.
+
+    `-U0` so a hunk covers only the lines that moved; the context is added back
+    by `hunk_range`, which is where its width is stated once. The prefixes are
+    pinned rather than inherited because `diff.mnemonicPrefix` renames them and
+    the path would then be read out of the wrong column."""
+    r = run_git(cwd, 'diff', '-U0', '--no-color', '--no-ext-diff',
+                '--src-prefix=a/', '--dst-prefix=b/', old, new)
+    if r is None or r.returncode != 0:
+        return None
+    return parse_hunks(r.stdout)
+
+
+def ranges_meet(mine, theirs):
+    """True if any of this branch's line spans touches any of the base's."""
+    return any(a[0] <= b[1] and b[0] <= a[1] for a in mine for b in theirs)
+
+
+def merge_conflicts(cwd, base):
+    """Paths git reports conflicting when <base> merges into HEAD, or None when
+    git won't say — no `--write-tree` before git 2.38, a missing ref, a shallow
+    clone. The one caller discounts an ignored path either way; the two answers
+    are kept apart so a reader can tell "merges clean" from "couldn't ask"."""
+    r = run_git(cwd, 'merge-tree', '--write-tree', '--name-only', base, 'HEAD')
+    if r is None or r.returncode not in (0, 1):
+        return None
+    if r.returncode == 0:
+        return frozenset()
+    paths = []
+    for line in r.stdout.splitlines()[1:]:   # line 1 is the merged tree
+        if not line:
+            break                            # then the conflict messages
+        paths.append(line)
+    return frozenset(paths)
+
+
+def glob_list(env_var, defaults=()):
+    """The non-empty comma-separated globs in <env_var>, appended to <defaults>.
+    Extend-only, matching `protected_patterns`, so every glob list here reads
+    the same way and a garbled value simply matches nothing."""
+    extra = os.environ.get(env_var) or ''
+    return list(defaults) + [p for p in (e.strip() for e in extra.split(',')) if p]
+
+
+def is_release_branch(branch):
+    """True if <branch> is named like a release branch (see
+    DEFAULT_RELEASE_BRANCHES). `fnmatchcase` for the same reason `is_protected`
+    uses it: the same config must select the same set on every platform."""
+    return any(fnmatch.fnmatchcase(branch, p)
+               for p in glob_list(RELEASE_BRANCHES_ENV, DEFAULT_RELEASE_BRANCHES))
+
+
+def overlap_ignored(path):
+    """True if <path> matches a BRANCH_GUARD_OVERLAP_IGNORE glob. Empty by
+    default, so nothing is discounted unless a project says so."""
+    return any(fnmatch.fnmatchcase(path, p) for p in glob_list(OVERLAP_IGNORE_ENV))
+
+
+def base_ref(cwd):
+    """The integration ref a branch is measured against.
+
+    BRANCH_GUARD_BASE_REF wins. Otherwise the clone's own `origin/HEAD` symref
+    answers it, so a `master`-default repo needs no configuration; a clone that
+    never set that symref falls back to BASE_REF_FALLBACK. A ref that doesn't
+    resolve isn't an error here — the caller's `rev-parse` fails and the whole
+    check skips."""
+    configured = (os.environ.get(BASE_REF_ENV) or '').strip()
+    if configured:
+        return configured
+    r = run_git(cwd, 'symbolic-ref', '--short', '-q', 'refs/remotes/origin/HEAD')
+    if r is not None and r.returncode == 0 and r.stdout.strip():
+        return r.stdout.strip()
+    return BASE_REF_FALLBACK
+
+
+def push_overlap(cwd, branch):
+    """(base_ref, paths) where the base's own movement lands in this branch's
+    edited lines. An empty path list means no overlap OR no opinion — every
+    probe that can't answer returns one, so the caller can only ever be told to
+    ask, never told the push is fine.
+
+    Both sides are diffed from the fork point, so both sets of ranges are
+    numbered in that shared ancestor and can be compared at all. Paths in both
+    sets are then tested range-by-range: sharing a file is not sharing an edit,
+    and reporting an overlap where there is none sends a session off to rebase a
+    branch that did not need it."""
+    if (os.environ.get(PUSH_OVERLAP_ENABLED_ENV) or '').strip().lower() in FALSE_VALUES:
+        return ('', [])
+    if is_release_branch(branch):
+        return ('', [])
+    base = base_ref(cwd)
+    fork = run_git(cwd, 'merge-base', 'HEAD', base)
+    tip = run_git(cwd, 'rev-parse', '--verify', '--quiet', base + '^{commit}')
+    if fork is None or fork.returncode != 0 or tip is None or tip.returncode != 0:
+        return (base, [])
+    fork_sha, tip_sha = fork.stdout.strip(), tip.stdout.strip()
+    # A base sitting on the fork point has an empty diff, so it shares no path
+    # and the loop below would find nothing anyway — this is a short-circuit
+    # that saves two `git diff` processes on the most common push, NOT a
+    # correctness guard. Removing it changes no verdict (measured: the mutant
+    # survives the suite), so don't add a fixture pretending otherwise.
+    if not fork_sha or fork_sha == tip_sha:
+        return (base, [])
+    mine = changed_ranges(cwd, fork_sha, 'HEAD')
+    theirs = changed_ranges(cwd, fork_sha, base)
+    if mine is None or theirs is None:
+        return (base, [])
+    shared = sorted(set(mine) & set(theirs))
+    ignored = [p for p in shared if overlap_ignored(p)]
+    # An ignored path is contended by construction — a merge driver owns it and
+    # nearly every branch edits it — so counting its ranges would fire always.
+    # A driver still refuses some of them (a row deleted one side and edited the
+    # other), so the discount is conditional on asking. git declining to answer
+    # discounts the path, same as a clean merge: an old git or a shallow clone
+    # must not turn into a wall of prompted pushes.
+    conflicts = merge_conflicts(cwd, base) if ignored else frozenset()
+    hits = []
+    for path in shared:
+        if path in ignored:
+            if conflicts and path in conflicts:
+                hits.append(path)
+        elif ranges_meet(mine[path], theirs[path]):
+            hits.append(path)
+    return (base, hits)
+
+
+def push_overlap_reason(base, paths):
+    """The CAUSE clause for an overlap ask; `confirm()` adds the closing one."""
+    return (f"'{base}' has moved since this branch left it, and its new commits "
+            f"edit the same lines this branch does in {', '.join(paths)} — the "
+            f"merge is going to come out wrong, and a merge queue would spend a "
+            f"whole check cycle finding that. "
+            f"`git fetch && git rebase {base}` finds it now")
+
+
+def skips_base(flags, short):
+    """True if a push lands nothing on the base (`--dry-run`, `--delete`), so
+    there is no overlap to have."""
+    return bool(flags & PUSH_OVERLAP_SKIP_FLAGS or short & PUSH_OVERLAP_SKIP_LETTERS)
+
+
 def _feature(branch, reason=None):
     """Verdict for a mutation that's routine on a feature branch but should be
     confirmed on a protected one: allow on non-protected, ask on protected,
@@ -1148,6 +1406,25 @@ def classify_git(sub, args, branch, policy, cwd, probe):
         if policy == 'off' or branch is None:
             return ('defer', None)
         decision, reason = push_decision(args, branch, policy)
+        # An auto-approve says the push is in bounds; it says nothing about the
+        # branch still being built on what it thinks it is. Checked ONLY on a
+        # would-be `allow`, so `protected` and `off` never run it and no verdict
+        # already asking is disturbed.
+        #
+        # Note this is not confined to commands that would have been approved:
+        # an `ask` from any segment wins over the all-segments rule, so
+        # `git push && rm -rf x` asks here where it used to defer. That is the
+        # right way round — the overlap is a property of the push, not of what
+        # is chained to it, and a defer would lose the catch entirely in a
+        # session that has allowlisted `git push`.
+        #
+        # `probe` is required for the same reason the `git branch` probes need
+        # it: these read the SESSION cwd, so a `git -C` pointing elsewhere would
+        # measure the wrong repository.
+        if decision == 'allow' and probe and not skips_base(flags, short):
+            base, paths = push_overlap(cwd, branch)
+            if paths:
+                return ('ask', push_overlap_reason(base, paths))
         return (decision or 'defer', reason)
 
     # Harmless mutations — don't put work onto or rewrite a branch's history.
@@ -1587,10 +1864,7 @@ def protected_patterns():
     empty, or all-whitespace value leaves exactly today's `main`/`master` set,
     and a garbled pattern just fails to match anything. That makes the
     fail-safe structural rather than something the parser has to get right."""
-    extra = os.environ.get(PROTECTED_BRANCHES_ENV) or ''
-    return list(DEFAULT_PROTECTED_BRANCHES) + [
-        p for p in (e.strip() for e in extra.split(',')) if p
-    ]
+    return glob_list(PROTECTED_BRANCHES_ENV, DEFAULT_PROTECTED_BRANCHES)
 
 
 def is_protected(branch):

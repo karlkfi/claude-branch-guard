@@ -1554,6 +1554,276 @@ check "override does not reach the edit path on main -> ask" ask \
   "$(decision_for "$(edit_payload Edit file_path "$WORK/file.txt")" "$WORK")"
 git -C "$WORK" checkout -q claude/x
 
+# 27. Push overlap. A `strict` auto-approve says the push is in bounds; it says
+#     nothing about the branch still being built on what it thinks it is. When
+#     the base has moved into the same LINES this branch edits, the auto-approve
+#     is withdrawn and the push asks.
+#
+#     Every case here needs a repo whose `origin/main` has moved independently of
+#     the branch, which `make_overlap_repo` builds by writing the ref straight
+#     into refs/remotes — nothing touches a network. The negative direction
+#     carries the weight: an overlap reported where there is none sends a session
+#     off to rebase a branch that did not need it, so the "no overlap" cells are
+#     the ones worth crossing.
+OVL="$(mktemp -d "$REPO_ROOT/tmp/overlap-repo.XXXXXX")"
+cleanup() {
+  rm -rf "$WORK" ${OUTSIDE:+"$OUTSIDE"} ${OVL:+"$OVL"}
+}
+
+# numbered PATH LINE MARKER -> 40 numbered lines, with LINE replaced by MARKER
+# (LINE 0 replaces nothing). Written whole rather than patched in place: BSD and
+# GNU `sed -i` take different arguments, and this suite runs on both.
+numbered() {
+  local out="$1" target="$2" marker="$3" i
+  : > "$out"
+  for i in $(seq 1 40); do
+    if [[ "$i" == "$target" ]]; then
+      printf '%s\n' "$marker" >> "$out"
+    else
+      printf 'line %d\n' "$i" >> "$out"
+    fi
+  done
+}
+
+# make_overlap_repo BRANCH BASE_FILE BASE_LINE BRANCH_FILE BRANCH_LINE
+#   BRANCH forks from main, then the base moves on top of that fork point and is
+#   published as refs/remotes/origin/main. BASE_LINE 0 leaves the base exactly
+#   where the branch left it, which is the control that makes an overlap
+#   assertion mean something.
+make_overlap_repo() {
+  local branch="$1" bfile="$2" bline="$3" wfile="$4" wline="$5"
+  rm -rf "$OVL"
+  mkdir -p "$OVL"
+  git -C "$OVL" init -q -b main
+  git -C "$OVL" config user.name "Test"
+  git -C "$OVL" config user.email "test@example.com"
+  numbered "$OVL/file.txt" 0 ''
+  numbered "$OVL/other.txt" 0 ''
+  numbered "$OVL/driver.txt" 0 ''
+  git -C "$OVL" add -A
+  git -C "$OVL" commit -q -m "init"
+  if [[ "$bline" != 0 ]]; then
+    git -C "$OVL" switch -q -c base-work
+    numbered "$OVL/$bfile" "$bline" "base edit"
+    git -C "$OVL" commit -q -am "base moves"
+  fi
+  git -C "$OVL" update-ref refs/remotes/origin/main HEAD
+  git -C "$OVL" switch -q main
+  git -C "$OVL" switch -q -c "$branch"
+  numbered "$OVL/$wfile" "$wline" "branch edit"
+  git -C "$OVL" commit -q -am "branch work"
+}
+
+ENABLED_OFF='BRANCH_GUARD_PUSH_OVERLAP_ENABLED=false'
+
+# 27a. The core pair. Same file, same line, base moved -> ask; the identical
+#      branch against a base that never moved -> allow. Without the second half
+#      the first proves only that something asked.
+make_overlap_repo claude/x file.txt 10 file.txt 10
+check "[overlap] base moved into the same line -> ask" ask \
+  "$(decision_for "$(push 'git push')" "$OVL")"
+check "[overlap] same, push origin HEAD -> ask" ask \
+  "$(decision_for "$(push 'git push origin HEAD')" "$OVL")"
+check_text "[overlap] reason names the file" has "file.txt" \
+  "$(reason_for "$(push 'git push')" "$OVL")"
+check_text "[overlap] reason names the base ref" has "origin/main" \
+  "$(reason_for "$(push 'git push')" "$OVL")"
+check_text "[overlap] reason offers the rebase" has "git rebase origin/main" \
+  "$(reason_for "$(push 'git push')" "$OVL")"
+check_text "[overlap] ask still invites a confirmation" has "confirm before proceeding" \
+  "$(reason_for "$(push 'git push')" "$OVL")"
+
+make_overlap_repo claude/x file.txt 0 file.txt 10
+check "[overlap] base has not moved -> allow" allow \
+  "$(decision_for "$(push 'git push')" "$OVL")"
+
+# 27b. Ranges, not paths. Context is 3 lines either side, so hunks 4 apart meet
+#      and hunks 7 apart do not — sharing a file is not sharing an edit.
+make_overlap_repo claude/x file.txt 10 file.txt 14
+check "[overlap] edits 4 lines apart -> ask" ask \
+  "$(decision_for "$(push 'git push')" "$OVL")"
+make_overlap_repo claude/x file.txt 10 file.txt 17
+check "[overlap] edits 7 lines apart -> allow" allow \
+  "$(decision_for "$(push 'git push')" "$OVL")"
+make_overlap_repo claude/x file.txt 10 other.txt 10
+check "[overlap] different files, same line number -> allow" allow \
+  "$(decision_for "$(push 'git push')" "$OVL")"
+
+# 27c. Flags that land nothing on the base have no overlap to have. Both
+#      spellings, long and bundled-short, against the repo that otherwise asks.
+make_overlap_repo claude/x file.txt 10 file.txt 10
+check "[overlap] --dry-run -> allow" allow \
+  "$(decision_for "$(push 'git push --dry-run')" "$OVL")"
+check "[overlap] -n -> allow" allow \
+  "$(decision_for "$(push 'git push -n')" "$OVL")"
+check "[overlap] --delete of the worktree branch -> allow" allow \
+  "$(decision_for "$(push 'git push --delete origin claude/x')" "$OVL")"
+
+# 27d. The check only ever withdraws an auto-approve. Under `protected` and
+#      `off` the push was never auto-approved, so it stays exactly as silent as
+#      before — the overlap must not introduce a prompt where there was none.
+check "[overlap] protected policy is untouched -> none" none \
+  "$(decision_for "$(push 'git push')" "$OVL" $PROT)"
+check "[overlap] off policy is untouched -> none" none \
+  "$(decision_for "$(push 'git push')" "$OVL" $OFF)"
+
+# 27e. A protected target is answered first, so the overlap never reaches it and
+#      the prompt still says why it really asked.
+git -C "$OVL" switch -q main
+check "[overlap] push to main still asks as shared" ask \
+  "$(decision_for "$(push 'git push origin main')" "$OVL")"
+check_text "[overlap] protected reason wins over the overlap" has \
+  "protected branch 'main'" "$(reason_for "$(push 'git push origin main')" "$OVL")"
+git -C "$OVL" switch -q claude/x
+
+# 27f. An overlap is a property of the push, not of what is chained to it, so it
+#      survives a segment that would otherwise drop the command to a defer —
+#      `git push && rm -rf foo` asks here rather than deferring. Pinned because
+#      it is the one place the overlap adds a prompt rather than withdrawing an
+#      approval, and because a defer would lose the catch outright in a session
+#      that has allowlisted `git push`. The control below is the same chain in a
+#      repo with no overlap, which still defers.
+check "[overlap] push && rm -> ask" ask \
+  "$(decision_for "$(push 'git push && rm -rf foo')" "$OVL")"
+check_text "[overlap] the chained ask still names the overlap" has "file.txt" \
+  "$(reason_for "$(push 'git push && rm -rf foo')" "$OVL")"
+check "[overlap] push && rm without an overlap -> none" none \
+  "$(decision_for "$(push 'git push && rm -rf foo')" "$WORK")"
+
+# 27g. Unattended, the ask becomes a deny — paired with the `auto` control, since
+#      a suite that only pinned the deny would pass with `auto` back in the
+#      non-interactive set. No push form is overridable, so the denial names no
+#      break-glass.
+check "[overlap] dontAsk -> deny" deny \
+  "$(decision_for "$(push_mode 'git push' dontAsk)" "$OVL")"
+check "[overlap] auto still asks" ask \
+  "$(decision_for "$(push_mode 'git push' auto)" "$OVL")"
+check_text "[overlap] deny does not offer a confirmation" lacks \
+  "confirm before proceeding" "$(reason_for "$(push_mode 'git push' dontAsk)" "$OVL")"
+check_text "[overlap] deny advertises no break-glass" lacks \
+  "BRANCH_GUARD_OVERRIDE=<reason>" "$(reason_for "$(push_mode 'git push' dontAsk)" "$OVL")"
+
+# 27h. Opting out, with the unset control beside it that pins the env var as the
+#      cause. Only a false spelling disables: a value nobody meant as false must
+#      leave the check running, or a typo silently stops the guard.
+check "[overlap] ENABLED=false -> allow" allow \
+  "$(decision_for "$(push 'git push')" "$OVL" $ENABLED_OFF)"
+check "[overlap] ENABLED=0 -> allow" allow \
+  "$(decision_for "$(push 'git push')" "$OVL" BRANCH_GUARD_PUSH_OVERLAP_ENABLED=0)"
+check "[overlap] ENABLED=true -> ask" ask \
+  "$(decision_for "$(push 'git push')" "$OVL" BRANCH_GUARD_PUSH_OVERLAP_ENABLED=true)"
+check "[overlap] ENABLED=garbage still asks" ask \
+  "$(decision_for "$(push 'git push')" "$OVL" BRANCH_GUARD_PUSH_OVERLAP_ENABLED=maybe)"
+check "[overlap] unset control -> ask" ask \
+  "$(decision_for "$(push 'git push')" "$OVL")"
+
+# 27i. A release branch is cut from the base and left diverged on purpose, so
+#      telling it to rebase would publish everything merged since the tag — a
+#      wrong answer, not a noisy one. Defaults, then the configured extension,
+#      each with the control that makes it mean something.
+make_overlap_repo release/1.2 file.txt 10 file.txt 10
+check "[overlap] release/1.2 is skipped -> allow" allow \
+  "$(decision_for "$(push 'git push')" "$OVL")"
+make_overlap_repo hotfix-9 file.txt 10 file.txt 10
+check "[overlap] hotfix-9 is skipped -> allow" allow \
+  "$(decision_for "$(push 'git push')" "$OVL")"
+make_overlap_repo v2.1 file.txt 10 file.txt 10
+check "[overlap] v2.1 is skipped -> allow" allow \
+  "$(decision_for "$(push 'git push')" "$OVL")"
+make_overlap_repo ship/9 file.txt 10 file.txt 10
+check "[overlap] ship/9 is not a default release name -> ask" ask \
+  "$(decision_for "$(push 'git push')" "$OVL")"
+check "[overlap] configured release glob skips it -> allow" allow \
+  "$(decision_for "$(push 'git push')" "$OVL" 'BRANCH_GUARD_RELEASE_BRANCHES=ship/*')"
+# Extend-only: naming one extra pattern must not drop the built-in ones.
+make_overlap_repo release/1.2 file.txt 10 file.txt 10
+check "[overlap] a configured glob EXTENDS the defaults -> allow" allow \
+  "$(decision_for "$(push 'git push')" "$OVL" 'BRANCH_GUARD_RELEASE_BRANCHES=ship/*')"
+
+# 27j. base_ref. An unresolvable one fails silent rather than blocking, and a
+#      configured one is measured instead of origin/main — the pair pins that
+#      the env var is what moved the answer.
+make_overlap_repo claude/x file.txt 10 file.txt 10
+check "[overlap] unresolvable base_ref -> allow" allow \
+  "$(decision_for "$(push 'git push')" "$OVL" BRANCH_GUARD_BASE_REF=origin/nope)"
+git -C "$OVL" update-ref refs/remotes/upstream/trunk refs/remotes/origin/main
+check "[overlap] configured base_ref is measured -> ask" ask \
+  "$(decision_for "$(push 'git push')" "$OVL" BRANCH_GUARD_BASE_REF=upstream/trunk)"
+check_text "[overlap] reason names the configured base" has "upstream/trunk" \
+  "$(reason_for "$(push 'git push')" "$OVL" BRANCH_GUARD_BASE_REF=upstream/trunk)"
+
+# 27k. overlap_ignore, crossed against whether the merge actually conflicts. A
+#      path a merge driver owns is contended by construction, so counting its
+#      ranges would fire on every push — but the discount is CONDITIONAL, and a
+#      path git refuses to merge still counts. Both cells, each with its unset
+#      control.
+make_overlap_repo claude/x driver.txt 10 driver.txt 12
+check "[overlap] ignored path, ranges meet, merge clean -> allow" allow \
+  "$(decision_for "$(push 'git push')" "$OVL" 'BRANCH_GUARD_OVERLAP_IGNORE=driver.txt')"
+check "[overlap] same repo without the ignore -> ask" ask \
+  "$(decision_for "$(push 'git push')" "$OVL")"
+make_overlap_repo claude/x driver.txt 10 driver.txt 10
+check "[overlap] ignored path whose merge conflicts -> ask" ask \
+  "$(decision_for "$(push 'git push')" "$OVL" 'BRANCH_GUARD_OVERLAP_IGNORE=driver.txt')"
+make_overlap_repo claude/x driver.txt 10 driver.txt 12
+check "[overlap] ignore glob rather than exact name -> allow" allow \
+  "$(decision_for "$(push 'git push')" "$OVL" 'BRANCH_GUARD_OVERLAP_IGNORE=driver.*')"
+check "[overlap] an ignore glob matching nothing changes nothing -> ask" ask \
+  "$(decision_for "$(push 'git push')" "$OVL" 'BRANCH_GUARD_OVERLAP_IGNORE=nope.*')"
+
+# 27l. The probes read the SESSION cwd, so a `git -C` pointing elsewhere would
+#      measure the wrong repository — the same reason the `git branch` probes
+#      are gated on it. The overlap is skipped and the push keeps the verdict it
+#      already had.
+make_overlap_repo claude/x file.txt 10 file.txt 10
+check "[overlap] git -C another repo skips the probe -> allow" allow \
+  "$(decision_for "$(bash_payload "git -C '$(nat "$WORK")' push")" "$OVL")"
+
+# 27m. A removed line that itself begins with `--` comes out of a unified diff as
+#      `--- …`, which is content rather than a file header. Reading one as a
+#      header files every LATER hunk in that file under a path that does not
+#      exist, so a real overlap goes unseen and the push sails through. The
+#      misfiling only shows with a second hunk after the fake header, which is
+#      why this deletes a `-- ` line near the top AND edits line 30: with the
+#      header run respected both hunks land under q.sql and the line-30 edit
+#      meets the base's; without it, only the deletion does and the answer flips
+#      to allow.
+sql_lines() {   # sql_lines PATH keep|drop LINE30
+  local out="$1" comment="$2" marker="$3" i
+  : > "$out"
+  for i in $(seq 1 40); do
+    if [[ "$i" == 10 ]]; then
+      [[ "$comment" == keep ]] && printf -- '-- DROP TABLE users\n' >> "$out"
+    elif [[ "$i" == 30 ]]; then
+      printf '%s\n' "$marker" >> "$out"
+    else
+      printf 'line %d\n' "$i" >> "$out"
+    fi
+  done
+  return 0
+}
+
+rm -rf "$OVL"
+mkdir -p "$OVL"
+git -C "$OVL" init -q -b main
+git -C "$OVL" config user.name "Test"
+git -C "$OVL" config user.email "test@example.com"
+sql_lines "$OVL/q.sql" keep 'line 30'
+git -C "$OVL" add -A
+git -C "$OVL" commit -q -m "init"
+git -C "$OVL" switch -q -c base-work
+sql_lines "$OVL/q.sql" keep 'base edit'
+git -C "$OVL" commit -q -am "base moves"
+git -C "$OVL" update-ref refs/remotes/origin/main HEAD
+git -C "$OVL" switch -q main
+git -C "$OVL" switch -q -c claude/x
+sql_lines "$OVL/q.sql" drop 'branch edit'
+git -C "$OVL" commit -q -am "branch work"
+check "[overlap] a removed '-- ' line is content, not a file header -> ask" ask \
+  "$(decision_for "$(push 'git push')" "$OVL")"
+check_text "[overlap] the hunk is filed under the real path" has "q.sql" \
+  "$(reason_for "$(push 'git push')" "$OVL")"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 
 # A FLOOR, not an exact count. The suite used to assert its own size against a
@@ -1568,7 +1838,7 @@ printf '\n%d passed, %d failed\n' "$pass" "$fail"
 # silently collapses, because setup failed or a section exited early -- while
 # conflicting with nobody. Raise it when the suite grows a lot; nothing breaks
 # if it lags.
-CASE_FLOOR=390
+CASE_FLOOR=430
 counts_ok=1
 if [[ $((pass + fail)) -lt "$CASE_FLOOR" ]]; then
   printf 'suite ran %d cases, under the floor of %d — did setup fail, or a section exit early?\n' \

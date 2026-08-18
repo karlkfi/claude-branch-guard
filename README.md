@@ -76,6 +76,9 @@ the default `strict` [push policy](#push-guard).
 | `git push` / `git push -u origin HEAD` *(worktree branch)* | allow |
 | `git push --force` *(worktree branch)* | allow |
 | `git push --force-with-lease=other origin HEAD:other` *(rewrites an unprotected branch, lease names the destination)* | allow |
+| `git push` *(worktree branch; the base moved, but not into the lines this branch edits)* | allow |
+| `git push --dry-run` / `git push --delete origin claude/x` *(nothing lands on the base, so no overlap to have)* | allow |
+| `git push` *(on `release/1.2` — a release branch is diverged from the base on purpose)* | allow |
 | `gh pr view 123` / `gh pr list` / `gh repo view` / `gh run watch` / `gh search prs` | allow |
 | `gh api repos/o/r` / `gh api -X GET …` *(a read — default or explicit GET)* | allow |
 | `git log \| head` / `gh pr checks 123 \| head -20` / `git diff --stat \| tail -n 5` *(piped to a read-only filter)* | allow |
@@ -99,6 +102,7 @@ the default `strict` [push policy](#push-guard).
 | `git push origin other-branch` *(strict policy — no lease naming the destination)* | **ask** |
 | `git push --force-with-lease=main origin HEAD:main` / `git push --delete --force-with-lease=other origin other` *(protected target; a deletion)* | **ask** |
 | `git push origin v1.3.0` / `git push origin refs/tags/v1.3.0` / `git push --tags` *(publishes a tag, strict policy)* | **ask** |
+| `git push` *(worktree branch, but the base has moved into the same lines this branch edits)* | **ask** |
 | `git reset --hard HEAD~1` *(uncommitted changes to tracked files, or a tip nothing else reaches, or on `main`)* | **ask** |
 | `git clean -fd` | **ask** |
 | `git stash drop` / `git stash clear` *(discards a stash)* | **ask** |
@@ -447,6 +451,49 @@ other push at `main`, and widening
 [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration) withdraws the auto-approve
 for whatever you add.
 
+**Overlap with a moved base.** An auto-approved push is in bounds. That says
+nothing about the branch still being built on what it thinks it is. When the base
+has moved into the same *lines* this branch edits, the merge is going to come out
+wrong — and under a merge queue it comes out wrong late, after the queue has
+validated the candidate and spent a whole check cycle on it. So the auto-approve
+is withdrawn and the push asks, naming the files and the fix:
+
+```
+'origin/main' has moved since this branch left it, and its new commits edit the
+same lines this branch does in hooks/branch-guard.py — the merge is going to come
+out wrong, and a merge queue would spend a whole check cycle finding that.
+`git fetch && git rebase origin/main` finds it now — confirm before proceeding.
+```
+
+Both sides are diffed from the fork point, so both sets of line numbers are
+counted in that shared ancestor and can be compared at all. Hunks are read with
+`-U0` and widened by the three lines of context a hunk carries, so edits within
+six lines of each other meet and edits seven apart do not — sharing a *file* is
+not sharing an edit.
+
+The check runs only where a push would otherwise be auto-approved, so `protected`
+and `off` never reach it. Every probe fails silent: a detached HEAD, a shallow
+clone, an unresolvable base ref, a git too old for `merge-tree --write-tree`, or
+no `origin` at all costs a missed catch rather than a blocked push. `--dry-run`
+and `--delete` land nothing on the base, so neither is checked.
+
+Release branches are skipped by name — `release/*`, `hotfix-*`, `v2.1` and the
+rest of `BRANCH_GUARD_RELEASE_BRANCHES`. One is cut from the base and left
+diverged on purpose, so telling it to rebase would publish everything merged
+since the tag: a wrong answer rather than a noisy one. Nothing in the commit graph
+tells a release branch from a stale topic branch — both sit behind the base and
+ahead of the fork point — so the name is the only signal there is.
+
+Three settings tune it, all under [Configuration](#configuration):
+`BRANCH_GUARD_BASE_REF` (unset derives it from the clone's own `origin/HEAD`, so a
+`master`-default repo needs no config), `BRANCH_GUARD_OVERLAP_IGNORE` for paths a
+merge driver owns, and `BRANCH_GUARD_PUSH_OVERLAP_ENABLED=false` to switch the
+check off.
+
+This check came from [pipe-guard](https://github.com/karlkfi/claude-pipe-guard),
+which shipped it first. branch-guard parses `push` to destination-ref depth, so it
+lives here; pipe-guard keeps the matching `gh pr create` check.
+
 The push guard is **best-effort**: it parses the Bash command Claude runs (so it
 only governs Claude's `Bash` tool), and unusual refspecs may not be classified —
 in which case it asks under `strict` / defers under `protected`, never silently
@@ -764,6 +811,40 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   commits and branch-sensitive mutations, the `Edit`/`Write` check, and the push
   guard's protected-target rule under both `strict` and `protected`.
 
+- **Push overlap** — on by default (see [Push guard](#push-guard)). Four knobs,
+  all optional:
+
+  ```json
+  {
+    "env": {
+      "BRANCH_GUARD_BASE_REF": "origin/main",
+      "BRANCH_GUARD_OVERLAP_IGNORE": "CHANGELOG.md,docs/roadmap.md",
+      "BRANCH_GUARD_RELEASE_BRANCHES": "ship/*",
+      "BRANCH_GUARD_PUSH_OVERLAP_ENABLED": "false"
+    }
+  }
+  ```
+
+  `BRANCH_GUARD_BASE_REF` names the integration ref this branch is measured
+  against. Leave it unset and the clone's own `origin/HEAD` answers it, so a
+  `master`-default repo works without configuration; a ref that doesn't resolve
+  switches the check off rather than blocking anything.
+
+  `BRANCH_GUARD_OVERLAP_IGNORE` is a comma-separated glob list for paths whose
+  overlap is expected — a changelog, or anything a custom merge driver owns, which
+  nearly every branch touches and which would otherwise fire on every push. The
+  discount is **conditional**: such a path still counts when `git merge-tree` says
+  the merge genuinely conflicts there, so an ignore entry suppresses the noise
+  without hiding a real collision.
+
+  `BRANCH_GUARD_RELEASE_BRANCHES` **extends** the built-in release-branch globs
+  rather than replacing them, the same way `BRANCH_GUARD_PROTECTED_BRANCHES` does.
+
+  `BRANCH_GUARD_PUSH_OVERLAP_ENABLED` switches the check off when set to `false`,
+  `0`, `no`, or `off`. Any other value — including one nobody meant as false —
+  leaves it on, so a typo costs a prompt somebody can answer rather than a guard
+  that quietly stopped running.
+
 - **Non-interactive modes** — in `dontAsk` and `bypassPermissions` an `ask` is
   automatically emitted as `deny` so the guard fails safe when no human is
   present. The denial says so plainly (see [Behavior](#behavior)): there is no
@@ -823,6 +904,14 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   reason is recorded — not a second opinion. What keeps it bounded is its scope,
   so treat "could this reach past this machine?" as the question when considering
   a new entry.
+- The [push overlap check](#push-guard) reads local refs, so it trusts your last
+  `git fetch` — a base that moved since then looks unmoved, and the push is
+  auto-approved. It also compares line *ranges*, not semantics: two edits six
+  lines apart are reported as meeting whether or not they interact, and a rename
+  or a moved function reads as unrelated. Treat it as a cheap prompt to rebase,
+  not proof the merge is clean. One shape is deliberately excluded: a release
+  branch is skipped on its *name*, so a topic branch named like a release
+  (`hotfix-typo`) is never checked.
 - The [`git branch` recoverability check](#git-branch-what-the-session-owns-not-how-the-verb-looks)
   reads local refs only, so it trusts your last `git fetch`. A remote-tracking
   ref left stale after the branch was deleted upstream still counts as
