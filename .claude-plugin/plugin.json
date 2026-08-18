@@ -9,5 +9,5 @@
   "homepage": "https://github.com/karlkfi/claude-branch-guard",
   "repository": "https://github.com/karlkfi/claude-branch-guard",
   "license": "MIT",
-  "keywords": ["claude-code", "hooks", "guardrail", "permissions", "safety", "git", "gh", "worktree", "push"]
+  "keywords": ["claude-code", "hooks", "guardrail", "permissions", "safety", "git", "gh", "worktree", "push", "break-glass"]
 }

@@ -1346,6 +1346,165 @@ check "[unset] leased rewrite of release/1.2 -> allow" allow \
 check "[configured] leased rewrite of release/1.2 -> ask" ask \
   "$(decision_for "$(push 'git push --force-with-lease=release/1.2 origin HEAD:release/1.2')" "$WORK" "$BR")"
 
+# 26. The `BRANCH_GUARD_OVERRIDE=<reason>` break-glass. An unanswerable `ask`
+#     in a non-interactive mode is a dead end, so the work reroutes onto
+#     whatever is ungated (hand-editing a file back to its HEAD content instead
+#     of `git restore`) or is abandoned. The prefix lifts an ask whose damage
+#     cannot leave this machine — and nothing else. Two independent locks keep
+#     it there: the subcommand must be in OVERRIDABLE_GIT, and the verdict must
+#     not be `ask-shared`. Both are crossed below, because covering each on its
+#     own would say nothing about the cell where an overridable subcommand
+#     meets a protected branch.
+#
+#     bash_mode COMMAND MODE -> a Bash payload carrying a permission_mode, with
+#     COMMAND json-encoded — the reason strings here contain spaces and quotes.
+bash_mode() {
+  jq -nc --arg cmd "$1" --arg mode "$2" \
+    '{tool_name: "Bash", tool_input: {command: $cmd}, permission_mode: $mode}'
+}
+OVR="BRANCH_GUARD_OVERRIDE='reverting a superseded local change'"
+
+#     26a. The case from the issue: `git restore` discarding worktree changes.
+check "restore --worktree, no override -> ask" ask \
+  "$(decision_for "$(bash_payload 'git restore file.txt')" "$WORK")"
+check "restore --worktree, overridden -> allow" allow \
+  "$(decision_for "$(bash_payload "$OVR git restore file.txt")" "$WORK")"
+#     The pair the relaxation exists for: in auto mode the bare form is a deny
+#     with no route forward, and the prefixed one goes through.
+check "[auto] restore --worktree, no override -> deny" deny \
+  "$(decision_for "$(bash_mode 'git restore file.txt' auto)" "$WORK")"
+check "[auto] restore --worktree, overridden -> allow" allow \
+  "$(decision_for "$(bash_mode "$OVR git restore file.txt" auto)" "$WORK")"
+
+#     The approval stays on the record: the cause and the stated reason both
+#     survive into the emitted decision, so an allow is never anonymous.
+ovr_reason="$(reason_for "$(bash_payload "$OVR git restore file.txt")" "$WORK")"
+check_text "override allow keeps the original cause" has \
+  'discards working-tree changes' "$ovr_reason"
+check_text "override allow names the variable" has \
+  'BRANCH_GUARD_OVERRIDE is set' "$ovr_reason"
+check_text "override allow echoes the reason given" has \
+  'reverting a superseded local change' "$ovr_reason"
+
+#     A liftable deny names the prefix, so the agent learns the route from the
+#     denial rather than rerouting onto an ungated hand-edit. The interactive
+#     ask does not: a human answering the prompt is the shorter path, and
+#     advertising a bypass beside it is the wrong nudge.
+check_text "[auto] liftable deny names the prefix" has \
+  'BRANCH_GUARD_OVERRIDE=<reason>' \
+  "$(reason_for "$(bash_mode 'git restore file.txt' auto)" "$WORK")"
+check_text "interactive ask does not name the prefix" lacks \
+  'BRANCH_GUARD_OVERRIDE' \
+  "$(reason_for "$(bash_payload 'git restore file.txt')" "$WORK")"
+
+#     26b. The reason is mandatory. A bare `BRANCH_GUARD_OVERRIDE=` would be the
+#     switch-it-off spelling, which is the thing this is not.
+check "empty override reason -> ask" ask \
+  "$(decision_for "$(bash_payload 'BRANCH_GUARD_OVERRIDE= git restore file.txt')" "$WORK")"
+check "whitespace-only override reason -> ask" ask \
+  "$(decision_for "$(bash_payload "BRANCH_GUARD_OVERRIDE='   ' git restore file.txt")" "$WORK")"
+
+#     26c. Only a real command-prefix assignment counts. The name appearing as
+#     an argument — in a pathspec, a commit message, an echoed line — is a
+#     positional, and disarms nothing.
+check "override name as a positional -> ask" ask \
+  "$(decision_for "$(bash_payload 'git clean -fd BRANCH_GUARD_OVERRIDE=why')" "$WORK")"
+check "override name echoed in another segment -> ask" ask \
+  "$(decision_for "$(bash_payload 'echo BRANCH_GUARD_OVERRIDE=why && git clean -fd')" "$WORK")"
+
+#     26d. Lock one: the subcommand must be in OVERRIDABLE_GIT. Everything that
+#     leaves this machine is outside it, whatever reason is given.
+check "override on a push to another branch -> ask" ask \
+  "$(decision_for "$(bash_payload "$OVR git push origin other")" "$WORK")"
+check "override on a tag publish -> ask" ask \
+  "$(decision_for "$(bash_payload "$OVR git push --tags")" "$WORK")"
+check "override on gh repo delete -> ask" ask \
+  "$(decision_for "$(bash_payload "$OVR gh repo delete owner/repo")" "$WORK")"
+check "override on gh pr close --delete-branch -> ask" ask \
+  "$(decision_for "$(bash_payload "$OVR gh pr close 1 --delete-branch")" "$WORK")"
+check "override on gh api DELETE of a ref -> ask" ask \
+  "$(decision_for "$(bash_payload "$OVR gh api -X DELETE repos/o/r/git/refs/heads/x")" "$WORK")"
+#     A push's deny must not advertise a prefix that would be refused again.
+check_text "[auto] unliftable deny stays silent about the prefix" lacks \
+  'BRANCH_GUARD_OVERRIDE' \
+  "$(reason_for "$(bash_mode 'git push origin other' auto)" "$WORK")"
+
+#     26e. Lock two: an `ask-shared` verdict — the cause is a protected branch —
+#     is unliftable even for a subcommand that is otherwise in bounds. This is
+#     the crossed cell: `reset --hard` and `branch -D` are both overridable
+#     subcommands, and both stay gated once the ref is shared.
+git -C "$WORK" checkout -q main
+check "override on reset --hard on main -> ask" ask \
+  "$(decision_for "$(bash_payload "$OVR git reset --hard HEAD~1")" "$WORK")"
+check "[auto] override on reset --hard on main -> deny" deny \
+  "$(decision_for "$(bash_mode "$OVR git reset --hard HEAD~1" auto)" "$WORK")"
+git -C "$WORK" checkout -q claude/x
+check "override on branch -D main -> ask" ask \
+  "$(decision_for "$(bash_payload "$OVR git branch -D main")" "$WORK")"
+#     The configured set reaches the override boundary too, with the unset
+#     control beside it: release/1.2 is recoverable, so only privacy moves —
+#     unset it allows outright, configured it asks and the override can't help.
+check "[unset] override on branch -D release/1.2 -> allow" allow \
+  "$(decision_for "$(bash_payload "$OVR git branch -D release/1.2")" "$WORK")"
+check "[configured] override on branch -D release/1.2 -> ask" ask \
+  "$(decision_for "$(bash_payload "$OVR git branch -D release/1.2")" "$WORK" "$BR")"
+
+#     26f. The three exclusions in `is_overridable`, each of which would let the
+#     override reach past the subcommand it was granted for.
+check "override with an output redirect to a file -> ask" ask \
+  "$(decision_for "$(bash_payload "$OVR git clean -fd > out.txt")" "$WORK")"
+check "override with a -c escape hatch -> ask" ask \
+  "$(decision_for "$(bash_payload "$OVR git -c core.pager=x clean -fd")" "$WORK")"
+check "override aimed at another repo -> ask" ask \
+  "$(decision_for "$(bash_payload "$OVR git -C /somewhere/else clean -fd")" "$WORK")"
+
+#     26g. The all-segments rule holds identically for an overridden allow: a
+#     command is lifted only when every other segment is recognized-safe, so
+#     nothing rides the override in.
+check "override with a trailing non-git segment -> ask" ask \
+  "$(decision_for "$(bash_payload "$OVR git clean -fd && rm -rf junk")" "$WORK")"
+check "override with a command substitution -> ask" ask \
+  "$(decision_for "$(bash_payload "$OVR git clean -fd \"\$(cat /etc/passwd)\"")" "$WORK")"
+check "override with one liftable and one unliftable ask -> ask" ask \
+  "$(decision_for "$(bash_payload "$OVR git clean -fd && git push origin other")" "$WORK")"
+#     A safe git segment ahead of the liftable one still allows, as it would
+#     without the override.
+check "override after a read-only git segment -> allow" allow \
+  "$(decision_for "$(bash_payload "$OVR git status && git clean -fd")" "$WORK")"
+check "override piped to a read-only filter -> allow" allow \
+  "$(decision_for "$(bash_payload "$OVR git clean -fd | head -5")" "$WORK")"
+
+#     26h. The rest of the local-loss tier, so the set is exercised rather than
+#     asserted. Each of these loses only state this machine holds.
+check "override on clean -fd -> allow" allow \
+  "$(decision_for "$(bash_payload "$OVR git clean -fd")" "$WORK")"
+check "override on stash drop -> allow" allow \
+  "$(decision_for "$(bash_payload "$OVR git stash drop")" "$WORK")"
+check "override on an irrecoverable branch -D -> allow" allow \
+  "$(decision_for "$(bash_payload "$OVR git branch -D reset-orphan")" "$WORK")"
+check "override on tag -d -> allow" allow \
+  "$(decision_for "$(bash_payload "$OVR git tag -d v1")" "$WORK")"
+check "override on worktree remove --force -> allow" allow \
+  "$(decision_for "$(bash_payload "$OVR git worktree remove --force ../wt")" "$WORK")"
+check "override on config --global -> allow" allow \
+  "$(decision_for "$(bash_payload "$OVR git config --global user.name x")" "$WORK")"
+check "override on switch --discard-changes -> allow" allow \
+  "$(decision_for "$(bash_payload "$OVR git switch --discard-changes main")" "$WORK")"
+check "override on reflog expire -> allow" allow \
+  "$(decision_for "$(bash_payload "$OVR git reflog expire --all")" "$WORK")"
+check "override on filter-branch -> allow" allow \
+  "$(decision_for "$(bash_payload "$OVR git filter-branch --tree-filter x")" "$WORK")"
+
+#     26i. The override adds no path where none existed: a defer stays a defer
+#     (normal permissions still apply), and the edit path is gated only by the
+#     protected branch, which the override never reaches.
+check "override on a deferring subcommand -> none" none \
+  "$(decision_for "$(bash_payload "$OVR git reset --soft HEAD~1")" "$WORK")"
+git -C "$WORK" checkout -q main
+check "override does not reach the edit path on main -> ask" ask \
+  "$(decision_for "$(edit_payload Edit file_path "$WORK/file.txt")" "$WORK")"
+git -C "$WORK" checkout -q claude/x
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 
 # A FLOOR, not an exact count. The suite used to assert its own size against a
@@ -1360,7 +1519,7 @@ printf '\n%d passed, %d failed\n' "$pass" "$fail"
 # silently collapses, because setup failed or a section exited early -- while
 # conflicting with nobody. Raise it when the suite grows a lot; nothing breaks
 # if it lags.
-CASE_FLOOR=330
+CASE_FLOOR=390
 counts_ok=1
 if [[ $((pass + fail)) -lt "$CASE_FLOOR" ]]; then
   printf 'suite ran %d cases, under the floor of %d — did setup fail, or a section exit early?\n' \

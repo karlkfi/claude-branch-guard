@@ -23,6 +23,7 @@ Everything else defers to your normal permission settings.
 
 - [What it does](#what-it-does)
 - [Behavior](#behavior)
+- [Break-glass: `BRANCH_GUARD_OVERRIDE`](#break-glass-branch_guard_override)
 - [Push guard](#push-guard)
 - [Install](#install)
 - [Upgrade](#upgrade)
@@ -115,6 +116,8 @@ the default `strict` [push policy](#push-guard).
 | `git restore file.txt` *(discards working changes)* | **ask** |
 | `git worktree remove --force ../wt` *(deletes a worktree holding modified or untracked files)* | **ask** |
 | `git config --global user.name x` | **ask** |
+| `BRANCH_GUARD_OVERRIDE=<reason> git restore file.txt` *(break-glass on a local-loss ask — see below)* | allow |
+| `BRANCH_GUARD_OVERRIDE=<reason> git push origin other` / `… gh repo delete o/r` / `… git branch -D main` *(the break-glass reaches none of these)* | **ask** |
 | `git pull` / `git pull --rebase` *(on `main` — lands a merge, or rewrites history)* | **ask** |
 | `git rebase`/`git merge` *(onto `main`)* | **ask** |
 | editing a **gitignored** path on `main` *(`tmp/scratch.json` — nothing the branch can contain)* | defer |
@@ -329,6 +332,57 @@ consults the index, and edits to that file really do land on the branch. The
 probe follows symlinks and asks about the file the write lands on, so a link
 inside an ignored directory pointing at a tracked file still asks — a link to a
 genuinely ignored file stays exempt.
+
+## Break-glass: `BRANCH_GUARD_OVERRIDE`
+
+In a non-interactive mode an **ask** becomes a **deny**, and a deny has no answer.
+That is right for a shared branch and wrong for a scratch one: the session still
+has work to do, so it does the work some other way. A session that couldn't run
+`git restore file.txt` edited the file back to its `HEAD` content by hand instead
+— same end state, no atomicity, no guarantee the result matched `HEAD`, and
+nothing in the log to review. Where no ungated equivalent exists (you cannot
+delete a branch by editing a file), the state is simply stranded.
+
+So one command prefix lifts an ask whose damage cannot leave this machine:
+
+```bash
+BRANCH_GUARD_OVERRIDE="reverting a superseded local change" git restore file.txt
+```
+
+The reason is **required** — a bare `BRANCH_GUARD_OVERRIDE=` lifts nothing — and
+it is echoed into the emitted decision, so the approval is on the record rather
+than silent. It is a command prefix rather than a `settings.json` variable because
+a `PreToolUse` hook inherits Claude Code's environment, not the one the command is
+about to run in; an env-var override could only be switched on for a whole
+session, by hand, which is the opposite of scoping it to the moment.
+
+**What it reaches.** Only these subcommands, each of which can lose local state
+and nothing else: `restore`, `switch`, `branch`, `tag`, `worktree`, `stash`,
+`reset`, `clean`, `config`, `reflog`, `filter-branch`, `gc`.
+
+**What it does not reach**, whatever reason you give:
+
+- **A protected branch.** `git reset --hard` on `main`, `git branch -D main`, a
+  commit or edit on `main` — the cause of the ask is a shared ref, and that class
+  of verdict is unliftable by construction, not by a list the override consults.
+  This includes anything you add to
+  [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration).
+- **Anything that leaves this machine.** Every `git push` form and every `gh`
+  delete/disable. A push publishes; `gh repo delete` removes something other
+  people can see.
+- **A command that reaches further than the subcommand it was granted for.** An
+  output redirect to a file (`… > out`), a `git -c`/`--config-env` escape hatch
+  (which can run arbitrary code), and a `git -C`/`--git-dir` aimed at another
+  repository all keep the ask.
+- **A command carrying anything unrecognized.** The all-segments rule applies
+  unchanged, so `BRANCH_GUARD_OVERRIDE=… git clean -fd && rm -rf junk` still asks.
+  A safe segment alongside is fine: `… git status && git clean -fd` is lifted.
+
+A denial that the prefix *would* lift says so, so an agent can find the route
+without being told about it in advance. A denial it would not lift doesn't
+mention it, because a hint that fails a second time is the dead end the wording
+exists to avoid. The interactive prompt never mentions it either — approving the
+prompt is the shorter path.
 
 ## Push guard
 
@@ -664,6 +718,14 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   forms.
 - **Expect a prompt for destructive commands** (`reset --hard`, `clean -f`,
   `branch -D`, `restore <path>`, `config --global`) — that's by design.
+- **When a destructive command is denied and you meant it, say why rather than
+  working around it.** In a non-interactive mode that prompt is a denial with no
+  answer, and the tempting workaround — hand-editing a file back to its `HEAD`
+  content instead of `git restore` — is the unsafe path *and* the ungated one.
+  Re-run with a reason instead:
+  `BRANCH_GUARD_OVERRIDE="reverting a superseded local change" git restore file.txt`.
+  It works only for losses confined to this machine, so a push, a `gh` deletion,
+  or anything on main/master stays denied — for those, ask the human.
 ```
 
 ## Configuration
@@ -700,9 +762,18 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   `ask` is automatically emitted as `deny` so the guard fails safe when no human
   is present. The denial says so plainly (see [Behavior](#behavior)): there is no
   confirmation to grant in this mode, so the way through is to run the command
-  yourself or re-run the session interactively. (Claude Code ignores hook
-  decisions entirely under `bypassPermissions`, so a hard guarantee there still
-  needs a git `pre-push` hook or server-side branch protection.)
+  yourself, re-run the session interactively, or — for the narrow set of asks it
+  covers — use the
+  [`BRANCH_GUARD_OVERRIDE` break-glass](#break-glass-branch_guard_override).
+  (Claude Code ignores hook decisions entirely under `bypassPermissions`, so a
+  hard guarantee there still needs a git `pre-push` hook or server-side branch
+  protection.)
+
+- **Break-glass** — `BRANCH_GUARD_OVERRIDE=<reason>` as a command prefix lifts an
+  ask whose damage stops at this machine. It is deliberately *not* a
+  `settings.json` variable, and it reaches no protected branch, no push, and no
+  `gh` deletion. See
+  [Break-glass: `BRANCH_GUARD_OVERRIDE`](#break-glass-branch_guard_override).
 
 ## Limitations
 
@@ -734,6 +805,12 @@ protected branch (main/master) or destructive git commands. To keep work flowing
   that branch. Add anything shared to
   [`BRANCH_GUARD_PROTECTED_BRANCHES`](#configuration); a branch with an open PR
   is not shared as far as the guard is concerned.
+- The [break-glass](#break-glass-branch_guard_override) is self-served: the agent
+  writes its own reason, and the guard checks only that one was given. It buys
+  legibility over the ungated alternative — the operation stays atomic and the
+  reason is recorded — not a second opinion. What keeps it bounded is its scope,
+  so treat "could this reach past this machine?" as the question when considering
+  a new entry.
 - The [`git branch` recoverability check](#git-branch-what-the-session-owns-not-how-the-verb-looks)
   reads local refs only, so it trusts your last `git fetch`. A remote-tracking
   ref left stale after the branch was deleted upstream still counts as

@@ -63,6 +63,16 @@ reason states only the CAUSE; `confirm()` adds the closing clause, so the two
 paths read honestly — an `ask` offers a confirmation, a `deny` says there is
 none to be had and points at the terminal instead.
 
+That denial is final, which is a dead end for a command the session had a good
+reason to run: with nothing to answer the prompt, work reroutes onto whatever
+ungated path exists (hand-editing a file back to its HEAD content rather than
+`git restore`) or is simply abandoned. So a narrow break-glass exists — the
+command prefix `BRANCH_GUARD_OVERRIDE=<reason>` (`override_reason`), which
+lifts an `ask` whose damage cannot leave this machine: OVERRIDABLE_GIT. It
+reaches no `gh` form, no push, and no protected branch — those asks are tagged
+`ask-shared` and are unliftable by construction. The reason is required, and is
+echoed into the emitted decision so the approval is on the record.
+
 Scope note: branch-guard reasons about git/branch *semantics*. The filesystem
 boundary (commands touching paths outside the workspace) is workspace-guard's
 job; the two don't overlap.
@@ -332,6 +342,29 @@ PUSH_POLICIES = ('off', 'protected', 'strict')
 # is converted to `deny` so the guard fails safe. Defined as a set so unknown /
 # version-specific mode names simply don't match.
 NON_INTERACTIVE_MODES = frozenset({'auto', 'dontAsk', 'bypassPermissions'})
+
+# Break-glass command prefix: `BRANCH_GUARD_OVERRIDE=<reason> git clean -fd`.
+# Read from the COMMAND STRING, not the hook process environment, because that
+# is the only form a session can set per command — a PreToolUse hook inherits
+# Claude Code's environment rather than the one the Bash tool is about to build,
+# so an env-var override can only be switched on for a whole session, by hand,
+# from settings.json. (Same fact pipe-guard 1.0.0 rests its own break-glass on.)
+# An empty value doesn't count: the prefix exists to make the caller say why.
+OVERRIDE_VAR = 'BRANCH_GUARD_OVERRIDE'
+
+# git subcommands whose `ask` the break-glass may lift. Every entry can lose
+# only state this machine holds — uncommitted work, an untracked file, a stash,
+# a local ref or tag, a worktree, git config, local history. Nothing here
+# publishes anything, removes a resource anyone else can see, or moves a shared
+# branch: `push` and every `gh` form are absent on purpose, and an `ask-shared`
+# verdict (the cause is a protected branch) stays unliftable whatever the
+# subcommand, so both locks have to fail before the override reaches a shared
+# ref. Adding an entry needs the same scrutiny as a READONLY_GIT one, pointed
+# the other way: it must be provably unable to reach past this machine.
+OVERRIDABLE_GIT = frozenset({
+    'restore', 'switch', 'branch', 'tag', 'worktree', 'stash', 'reset',
+    'clean', 'config', 'reflog', 'filter-branch', 'gc',
+})
 
 
 def split_newline_separators(tokens):
@@ -791,12 +824,14 @@ def lease_target(token, current):
 
 def push_decision(args, current, policy):
     """Given the tokens after `push`, the worktree's current branch, and the
-    policy, return (decision, reason) where decision is 'allow', 'ask', or None
-    (defer). strict auto-approves a push of the worktree branch (incl. force),
-    and a rewrite of one other unprotected branch from it when an explicit
-    `--force-with-lease=<dst>` names that destination; protected only asks on a
-    protected target. Leans toward asking (strict) / deferring (protected) on
-    parsing uncertainty, never toward allowing."""
+    policy, return (decision, reason) where decision is 'allow', 'ask',
+    'ask-shared' (a protected target), or None (defer). strict auto-approves a
+    push of the worktree branch (incl. force), and a rewrite of one other
+    unprotected branch from it when an explicit `--force-with-lease=<dst>` names
+    that destination; protected only asks on a protected target. Leans toward
+    asking (strict) / deferring (protected) on parsing uncertainty, never toward
+    allowing. No push verdict is liftable by the break-glass — a push leaves
+    this machine, which puts every form of it outside OVERRIDABLE_GIT."""
     positionals, many, tags, delete, i = [], False, False, False, 0
     leased = set()
     while i < len(args):
@@ -839,7 +874,7 @@ def push_decision(args, current, policy):
         if glob:
             return ('ask', "Push uses a wildcard refspec (multiple branches)")
         if dst_b and is_protected(dst_b):
-            return ('ask', f"Push targets protected branch '{dst_b}'")
+            return ('ask-shared', f"Push targets protected branch '{dst_b}'")
         if policy == 'strict':
             if other is not None:
                 return ('ask', f"Push targets '{other}', a tag or other non-branch ref "
@@ -882,7 +917,7 @@ def _feature(branch, reason=None):
     if branch is None:
         return ('defer', None)
     if is_protected(branch):
-        return ('ask', reason or f"Targets protected branch '{branch}'")
+        return ('ask-shared', reason or f"Targets protected branch '{branch}'")
     return ('allow', None)
 
 
@@ -1001,7 +1036,7 @@ def classify_branch(flags, short, pos, current, cwd, probe):
     # protected target asks whether or not git would permit the delete.
     for name, reason in protected_targets(delete, move, copy, force, pos, current):
         if is_protected(name):
-            return ('ask', reason)
+            return ('ask-shared', reason)
 
     # Recoverable, per form. Everything below may assume no target is shared.
     if delete:
@@ -1072,7 +1107,7 @@ def classify_reset(branch, cwd, probe):
     if branch is None:
         return ('ask', "`git reset --hard` discards changes")
     if is_protected(branch):
-        return ('ask', f"`git reset --hard` on protected branch '{branch}'")
+        return ('ask-shared', f"`git reset --hard` on protected branch '{branch}'")
     if not probe:
         return ('ask', "`git reset --hard` discards changes, and a "
                        "`git -C`/`--git-dir` option points at another "
@@ -1087,7 +1122,8 @@ def classify_reset(branch, cwd, probe):
 
 
 def classify_git(sub, args, branch, policy, cwd, probe):
-    """Verdict ('allow' | 'ask' | 'defer', reason) for a `git <sub>` command."""
+    """Verdict ('allow' | 'ask' | 'ask-shared' | 'defer', reason) for a
+    `git <sub>` command."""
     flags = {a for a in args if a.startswith('-')}
     short = short_flag_letters(args)
     pos = [a for a in args if not a.startswith('-')]
@@ -1310,10 +1346,48 @@ def targets_other_repo(globals_):
                for g in globals_ for o in REPO_REDIRECT_OPTS)
 
 
+def override_reason(segments):
+    """The reason from a `BRANCH_GUARD_OVERRIDE=<reason>` command prefix, or
+    None when it is absent or empty.
+
+    Only the LEADING assignment run of a segment counts, which is what stops
+    the name disarming anything when it merely appears in a command: a real
+    prefix sits in command position, while the name inside a commit message,
+    a grep pattern, or an `echo` argument is a positional and matches nothing
+    here."""
+    prefix = OVERRIDE_VAR + '='
+    for seg, _ in segments:
+        for tok in seg:
+            if not ASSIGNMENT_RE.match(tok):
+                break
+            if tok.startswith(prefix) and tok[len(prefix):].strip():
+                return tok[len(prefix):].strip()
+    return None
+
+
+def is_overridable(inv, verdict, writes):
+    """True if a segment's `ask` is one the break-glass may lift: a plain `ask`
+    — never an `ask-shared`, whose cause is a protected branch — from a git
+    subcommand in OVERRIDABLE_GIT, aimed at this repository, with nothing
+    attached that reaches further than the subcommand itself.
+
+    Those three exclusions are what keep the override inside the scope it
+    claims. An output redirect to a file writes content the classifier never
+    saw; a `git -c`/`--config-env` escape hatch can run arbitrary code
+    (`-c core.pager='!sh …'`); and a `git -C`/`--git-dir` pointing elsewhere
+    puts the loss in a checkout this session doesn't own — the one thing
+    "damage stops at this machine" has to rule out."""
+    return (verdict == 'ask' and not writes and inv is not None
+            and inv['prog'] == 'git' and inv['sub'] in OVERRIDABLE_GIT
+            and not (set(inv['globals']) & GIT_ESCAPE_HATCHES)
+            and not targets_other_repo(inv['globals']))
+
+
 def classify_segment(inv, branch, policy, cwd):
-    """Verdict ('nongit' | 'allow' | 'ask' | 'defer', reason) for one segment.
-    'nongit' marks a segment that isn't a git/gh invocation (so the whole
-    command can't be auto-approved)."""
+    """Verdict ('nongit' | 'allow' | 'ask' | 'ask-shared' | 'defer', reason) for
+    one segment. 'nongit' marks a segment that isn't a git/gh invocation (so the
+    whole command can't be auto-approved); 'ask-shared' is an `ask` whose cause
+    is a protected branch, kept distinct so the break-glass can't lift it."""
     if inv is None:
         return ('nongit', None)
     if inv['prog'] == 'gh':
@@ -1524,7 +1598,7 @@ def emit(decision, reason):
     }}))
 
 
-def confirm(reason, mode):
+def confirm(reason, mode, liftable=False):
     """Emit `ask`, or `deny` when running in a non-interactive permission mode
     where no human is present to answer the prompt (fail safe).
 
@@ -1534,13 +1608,24 @@ def confirm(reason, mode):
     says plainly that there is none — a denial worded "confirm before
     proceeding" reads as a prompt waiting to be answered, so an agent retries a
     command that cannot succeed in this session until it gives up. Name the
-    mode, and give the routes that do work."""
+    mode, and give the routes that do work.
+
+    `liftable` says the break-glass would be honored for this exact command, so
+    the denial names it. The caller passes it only after checking the whole
+    command, not just the offending segment — a hint on something that would be
+    denied a second time is the same dead end the wording exists to avoid. The
+    interactive `ask` never mentions the prefix: a human answering the prompt is
+    the shorter route, and advertising a bypass beside it is the wrong nudge."""
     if mode in NON_INTERACTIVE_MODES:
+        routes = (f"Retrying as-is won't help — re-run it prefixed with "
+                  f"`{OVERRIDE_VAR}=<reason>` if the loss is deliberate, or do "
+                  f"it outside this session (e.g. in a terminal)."
+                  if liftable else
+                  "Retrying won't help — either do it outside this session "
+                  "(e.g. run the command in a terminal), or re-run in an "
+                  "interactive permission mode.")
         emit('deny', f"{reason} — branch-guard denied it: permission mode "
-                     f"'{mode}' has no way to prompt for confirmation. Retrying "
-                     f"won't help — either do it outside this session (e.g. run "
-                     f"the command in a terminal), or re-run in an interactive "
-                     f"permission mode.")
+                     f"'{mode}' has no way to prompt for confirmation. {routes}")
         return
     emit('ask', f"{reason} — confirm before proceeding.")
 
@@ -1588,13 +1673,13 @@ def main():
                 # segment, so a filter-/benign-only command (`head -5`,
                 # `echo hi`) defers rather than allows.
                 if writes:
-                    verdicts.append(('nongit', None))
+                    verdicts.append(('nongit', None, False))
                 elif is_safe_read_filter(seg):
-                    verdicts.append(('filter', None))
+                    verdicts.append(('filter', None, False))
                 elif is_benign_segment(seg):
-                    verdicts.append(('benign', None))
+                    verdicts.append(('benign', None, False))
                 else:
-                    verdicts.append(('nongit', None))
+                    verdicts.append(('nongit', None, False))
             else:
                 verdict, reason = classify_segment(inv, branch, policy, cwd)
                 # An output redirect to a file is a write side-effect the
@@ -1603,18 +1688,40 @@ def main():
                 # allow to defer, but never weaken a protective `ask`.
                 if writes and verdict == 'allow':
                     verdict = 'defer'
-                verdicts.append((verdict, reason))
+                verdicts.append((verdict, reason,
+                                 is_overridable(inv, verdict, writes)))
 
         # A protective ask wins over everything (and becomes deny when no human
-        # is present). Otherwise the command is auto-approved only when EVERY
-        # segment is recognized-safe — a git/gh `allow`, a safe read filter, or
-        # a side-effect-free benign label — so a non-git, writing, or unknown
-        # segment can't ride along.
-        for verdict, reason in verdicts:
-            if verdict == 'ask':
+        # is present). A shared one — the cause is a protected branch — is
+        # answered first, so no break-glass below can reach it. Otherwise the
+        # command is auto-approved only when EVERY segment is recognized-safe —
+        # a git/gh `allow`, a safe read filter, or a side-effect-free benign
+        # label — so a non-git, writing, or unknown segment can't ride along.
+        for verdict, reason, _ in verdicts:
+            if verdict == 'ask-shared':
                 confirm(reason, mode)
                 return
-        if all(verdict in ('allow', 'filter', 'benign') for verdict, _ in verdicts):
+        asks = [(reason, ovr) for verdict, reason, ovr in verdicts
+                if verdict == 'ask']
+        if asks:
+            # The break-glass lifts a local-loss ask, but only for a command
+            # that is otherwise entirely recognized-safe: every other segment
+            # allow/filter/benign, every ask liftable, and no hidden command
+            # substitution. Anything less and a second command would ride the
+            # override in, which is the gap the all-segments rule closes for
+            # `allow` and has to close here identically.
+            liftable = (all(ovr for _, ovr in asks)
+                        and all(v in ('allow', 'filter', 'benign', 'ask')
+                                for v, _, _ in verdicts)
+                        and not has_shell_substitution(tokens))
+            override = override_reason(segments) if liftable else None
+            if override:
+                emit('allow', f"{asks[0][0]} — {OVERRIDE_VAR} is set "
+                              f"({override}), so branch-guard allowed it.")
+                return
+            confirm(asks[0][0], mode, liftable)
+            return
+        if all(verdict in ('allow', 'filter', 'benign') for verdict, _, _ in verdicts):
             # A hidden command substitution / process substitution / unrecognized
             # operator would run code the classifier never saw, so it can't ride
             # along into an auto-approve — defer (the protective `ask` above is
