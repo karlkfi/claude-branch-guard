@@ -15,7 +15,10 @@ For Bash `git`/`gh` commands it emits a per-command decision:
 destructive the verb looks (`classify_branch`). A target is in bounds when it is
 recoverable — its tip is reachable from a remote-tracking ref or a local
 integration branch (RECOVERY_REF_PATTERNS), so the worst case is a
-`git reset --hard <sha>` — and private, meaning not in the protected set. This
+`git reset --hard <sha>` — and private, meaning not in the protected set. A
+force-delete has one more way to be in bounds: when every commit it would
+orphan is a merge that `git merge-tree` reproduces from its parents, the branch
+holds nothing original to lose (`orphans_only_reproducible_merges`). This
 only ever relaxes a would-be `ask` into an `allow`, and only on proof from a
 local git query: a foreign repo (`git -C`), an unreachable git, or a branch that
 won't resolve all keep asking. The non-force spellings need no query, because
@@ -137,6 +140,19 @@ REPO_REDIRECT_OPTS = ('-C', '--git-dir', '--work-tree')
 # that owns the ref. A pattern matching nothing is silently ignored by
 # for-each-ref, so listing `master` in a `main`-only repo is harmless.
 RECOVERY_REF_PATTERNS = ('refs/remotes', 'refs/heads/main', 'refs/heads/master')
+
+# The same set spelled for `git rev-list`, which takes revisions rather than
+# ref-namespace patterns: `--remotes` is its name for all of refs/remotes, and
+# `--ignore-missing` (passed alongside) covers a repo with no local main or no
+# master, where a bare ref name would abort the walk with exit 128.
+RECOVERY_REV_ARGS = ('--remotes', 'refs/heads/main', 'refs/heads/master')
+
+# How many orphaned commits `orphans_only_reproducible_merges` will examine.
+# Each costs two more git processes on top of the rev-list, against Claude
+# Code's 10s budget for the whole hook. The case the check exists for — a
+# scratch branch carrying one test-merge — sits at the bottom of that range, so
+# a low cap costs nothing real and a longer orphan list keeps asking.
+MAX_EXAMINED_ORPHANS = 4
 
 # Read-only git subcommands — auto-allowed on any branch.
 READONLY_GIT = frozenset({
@@ -950,6 +966,13 @@ def classify_branch(flags, short, pos, current, cwd, probe):
     `git reset --hard <sha>` — and *private*, meaning not in the protected set.
     A protected branch is shared, so it always asks.
 
+    Recoverability is a property of the tip, and a force-delete cares about
+    something slightly wider: what the branch would orphan. The two differ for
+    one shape — a scratch branch that merged an integration ref — which
+    `orphans_only_reproducible_merges` handles for `-D` alone. The force
+    move/copy forms keep the tip-only question; the same widening would fit
+    them, and is deliberately not made here.
+
     This can only ever relax a would-be `ask` into an `allow`, and only on
     proof: every form the probes can't answer for keeps asking, so an
     unreachable git, a foreign repo, or a branch that doesn't exist all land on
@@ -1000,6 +1023,12 @@ def classify_branch(flags, short, pos, current, cwd, probe):
             if rec is True:
                 continue
             if rec is False:
+                # An unreachable tip is not the same as lost work. A scratch
+                # branch that merged an integration ref to see what would happen
+                # holds exactly one commit nothing else names — that merge — and
+                # re-running it proves the commit stores nothing original.
+                if orphans_only_reproducible_merges(cwd, b):
+                    continue
                 return ('ask', f"`git branch -D` force-deletes '{b}', whose "
                                f"tip isn't reachable from any remote-tracking "
                                f"branch or main")
@@ -1365,6 +1394,56 @@ def tip_is_recoverable(cwd, name):
     if r is None or r.returncode != 0:
         return None
     return bool(r.stdout.strip())
+
+
+def orphans_only_reproducible_merges(cwd, name):
+    """True when deleting branch <name> would orphan nothing that isn't already
+    derivable from the refs outliving it.
+
+    `tip_is_recoverable` asks whether the tip itself survives, which a scratch
+    branch carrying a test-merge (`switch -c tmp; merge origin/main`) can never
+    satisfy: the merge commit is new, so the tip is unreachable precisely
+    BECAUSE the branch merged the thing it was checking against. What such a
+    branch actually orphans is that merge and nothing else — both parents stay
+    on refs that outlive it.
+
+    A merge stores a tree, though, and a hand-resolved conflict lives only
+    there, so "it is only a merge" does not establish that nothing is lost.
+    Re-running the merge does: `git merge-tree --write-tree` recomputes the tree
+    from the two parents, and a commit whose recorded tree matches carries
+    nothing a plain `git merge` would not produce again.
+
+    True only on that proof. False on every other answer, including every one
+    the probe cannot give — an orphaned non-merge or octopus commit, a merge
+    that conflicts or was edited by hand, a git too old for `--write-tree`
+    (which rejects the flag), a timeout, a read-only object store, or an orphan
+    list longer than MAX_EXAMINED_ORPHANS — so uncertainty keeps the caller's
+    `ask`. (`--write-tree` leaves the recomputed tree in the object store as an
+    unreferenced object, which gc prunes; nothing else in the repo changes.)
+    """
+    r = run_git(cwd, 'rev-list', '--parents', '--ignore-missing', name,
+                '--not', *RECOVERY_REV_ARGS)
+    if r is None or r.returncode != 0:
+        return False
+    orphans = [ln.split() for ln in r.stdout.splitlines() if ln.strip()]
+    # Nothing orphaned contradicts the unreachable tip the caller just measured,
+    # and `--ignore-missing` swallows a name that won't resolve into the same
+    # empty answer — so read it as unproven rather than as proof.
+    if not orphans or len(orphans) > MAX_EXAMINED_ORPHANS:
+        return False
+    for parts in orphans:
+        if len(parts) != 3:           # the commit plus exactly two parents
+            return False
+        sha, first, second = parts
+        merged = run_git(cwd, 'merge-tree', '--write-tree', first, second)
+        if merged is None or merged.returncode != 0:
+            return False
+        recorded = run_git(cwd, 'rev-parse', sha + '^{tree}')
+        if recorded is None or recorded.returncode != 0:
+            return False
+        if merged.stdout.strip() != recorded.stdout.strip():
+            return False
+    return True
 
 
 def nearest_existing_dir(path):

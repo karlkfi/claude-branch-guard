@@ -86,6 +86,7 @@ the default `strict` [push policy](#push-guard).
 | `git pull` / `git pull --rebase` *(feature branch — as `fetch`, `merge`, and `rebase` already are)* | allow |
 | `git branch -d old` / `git branch -m old new` / `git branch -c old copy` *(unprotected target; git refuses the unsafe cases itself)* | allow |
 | `git branch -D old` *(tip survives on a remote-tracking branch or `main`)* | allow |
+| `git branch -D tmp-basecheck` *(scratch ref whose only unshared commit is a merge git reproduces)* | allow |
 | `git branch -f backup claude/x` *(the ref doesn't exist yet — a create)* | allow |
 | `git reset --hard origin/main` *(clean worktree, feature branch whose tip survives elsewhere)* | allow |
 | `git stash` / `git stash pop` *(any branch — adds no commit, rewrites no history, recoverable by design)* | allow |
@@ -100,7 +101,8 @@ the default `strict` [push policy](#push-guard).
 | `git reset --hard HEAD~1` *(uncommitted changes to tracked files, or a tip nothing else reaches, or on `main`)* | **ask** |
 | `git clean -fd` | **ask** |
 | `git stash drop` / `git stash clear` *(discards a stash)* | **ask** |
-| `git branch -D old` *(tip reachable from nothing else — the commits would be orphaned)* | **ask** |
+| `git branch -D old` *(tip reachable from nothing else, and the branch carries commits of its own)* | **ask** |
+| `git branch -D tmp-conflict` *(its merge was resolved by hand, so that tree exists nowhere else)* | **ask** |
 | `git branch -d main` / `git branch -D main` / `git branch -m x main` *(protected branch, any spelling)* | **ask** |
 | `git branch -f old main` / `git branch -M x old` *(moves an existing branch off commits nothing else reaches)* | **ask** |
 | `gh pr close 5 --delete-branch` / `gh pr close 5 -d` *(deletes a branch whose work was never merged)* | **ask** |
@@ -175,7 +177,30 @@ which branches you consider shared, so `git branch -d main` prompts exactly like
 loses nothing and auto-approves; the same command pointed at a ref that already
 exists is judged on what that ref currently points at.
 
-The check runs two local `git` queries and never touches the network. It can
+A force-delete has one more way to be in bounds, because "the tip survives" and
+"nothing is lost" turn out not to be the same question. Consider a scratch
+branch that merged an integration ref to see what would happen:
+
+```bash
+git switch -c tmp-basecheck
+git merge origin/main       # does the gate still pass over the merged tree?
+git switch -
+git branch -D tmp-basecheck
+```
+
+Its tip is unreachable *because* it merged — the merge commit is new, so no
+remote-tracking ref can contain it — while what the delete orphans is that one
+commit, both of whose parents stay exactly where they were. So the hook re-runs
+the merge: `git merge-tree` recomputes a tree from the two parents, and if it
+matches the tree the commit records, the commit holds nothing a plain
+`git merge` wouldn't produce again. A merge whose conflicts you settled by hand
+does **not** reproduce — that tree is authored work living nowhere else — so it
+keeps prompting, as does a branch carrying any ordinary commit of its own, an
+octopus merge, or a git too old for `merge-tree --write-tree` (2.38, 2022).
+Only `-D` and `--delete --force` get this; the force move/copy forms still ask
+on an unreachable tip.
+
+The checks are local `git` queries and never touch the network. They can
 only ever turn a prompt into an approval, and only on a positive answer — if git
 can't be reached, the branch won't resolve, or a `git -C`/`--git-dir` option
 points the command at a different repository than the one the queries read, the

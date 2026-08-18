@@ -1144,6 +1144,82 @@ check "git branch -d --force irrecoverable -> ask" ask \
 check "git branch --delete --force recoverable -> allow" allow \
   "$(decision_for "$(bash_cmd 'git branch --delete --force merged')" "$WORK")"
 
+#     A surviving tip is not the only way a delete can be in bounds. A scratch
+#     branch that merged an integration ref to see what would happen
+#     (`switch -c tmp; merge origin/main`) has an unreachable tip precisely
+#     BECAUSE it merged -- the merge commit is new -- while what it orphans is
+#     that one commit and nothing else. Re-running the merge is what separates
+#     "only a merge" from "nothing original": a hand-resolved conflict lives in
+#     the merge's tree and nowhere else, so a merge that does not reproduce
+#     keeps asking.
+#
+#     `side1`/`side2` are recoverable via remote-tracking refs, so every merge
+#     below orphans only itself and the fixtures differ in the one property
+#     under test.
+git -C "$WORK" checkout -q -b side1 main
+printf 'one\n' > "$WORK/side1.txt"
+git -C "$WORK" add side1.txt
+git -C "$WORK" commit -q -m "side one"
+git -C "$WORK" update-ref refs/remotes/origin/side1 \
+  "$(git -C "$WORK" rev-parse side1)"
+git -C "$WORK" checkout -q -b side2 main
+printf 'two\n' > "$WORK/side2.txt"
+git -C "$WORK" add side2.txt
+git -C "$WORK" commit -q -m "side two"
+git -C "$WORK" update-ref refs/remotes/origin/side2 \
+  "$(git -C "$WORK" rev-parse side2)"
+
+#     `testmerge` is the reported case: a clean two-parent merge of recoverable
+#     refs. `testmerge-plus` adds a commit of its own on top, so the delete
+#     orphans something no merge can account for.
+git -C "$WORK" checkout -q -b testmerge pushed
+git -C "$WORK" merge -q --no-edit side1
+git -C "$WORK" checkout -q -b testmerge-plus testmerge
+git -C "$WORK" commit -q --allow-empty -m "work only this branch has"
+
+#     `resolved` merges a genuine conflict and settles it by hand, so its tree
+#     is authored work that exists in no parent. `octo` has three parents, which
+#     `git merge-tree` cannot re-run at all.
+git -C "$WORK" checkout -q -b clash-a main
+printf 'a\n' > "$WORK/shared.txt"
+git -C "$WORK" add shared.txt
+git -C "$WORK" commit -q -m "clash a"
+git -C "$WORK" update-ref refs/remotes/origin/clash-a \
+  "$(git -C "$WORK" rev-parse clash-a)"
+git -C "$WORK" checkout -q -b clash-b main
+printf 'b\n' > "$WORK/shared.txt"
+git -C "$WORK" add shared.txt
+git -C "$WORK" commit -q -m "clash b"
+git -C "$WORK" update-ref refs/remotes/origin/clash-b \
+  "$(git -C "$WORK" rev-parse clash-b)"
+git -C "$WORK" checkout -q -b resolved clash-a
+git -C "$WORK" merge --no-edit clash-b >/dev/null 2>&1 || true
+printf 'resolved by hand\n' > "$WORK/shared.txt"
+git -C "$WORK" add shared.txt
+git -C "$WORK" commit -q --no-edit
+git -C "$WORK" checkout -q -b octo pushed
+git -C "$WORK" merge -q --no-edit side1 side2
+git -C "$WORK" checkout -q claude/x
+
+check "git branch -D a scratch test-merge -> allow" allow \
+  "$(decision_for "$(bash_cmd 'git branch -D testmerge')" "$WORK")"
+check "git branch -D a test-merge carrying its own commit -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -D testmerge-plus')" "$WORK")"
+check "git branch -D a hand-resolved merge -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -D resolved')" "$WORK")"
+check "git branch -D an octopus merge -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -D octo')" "$WORK")"
+#     Reproducible and shared are independent, and only the second is the
+#     plugin's to judge -- so the proof must not reach past the protected check.
+#     The allow above is this pair's unset control.
+check "[configured] git branch -D a scratch test-merge -> ask" ask \
+  "$(decision_for "$(bash_cmd 'git branch -D testmerge')" "$WORK" \
+     'BRANCH_GUARD_PROTECTED_BRANCHES=testmerge')"
+#     The unattended mode is what the widening exists for: the reported session
+#     had no way to answer. Its other half is the `-D orphan` deny below.
+check "[auto] git branch -D a scratch test-merge -> allow" allow \
+  "$(decision_for "$(push_mode 'git branch -D testmerge' 'auto')" "$WORK")"
+
 #     Force move/copy: creating a new ref loses nothing; moving an existing one
 #     depends on whether its CURRENT tip survives elsewhere.
 check "git branch -f creating a backup ref -> allow" allow \
