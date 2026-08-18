@@ -34,6 +34,20 @@ if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fi
 fi
 
+# Claude Code reads hooks.json's `timeout` in *seconds* (default 600 for a
+# command hook), so a millisecond-shaped value is a ceiling hours away rather
+# than the backstop it looks like. The hook shells out to git, so a wedged repo
+# is a real hang; run_git's own 5s cap bounds each probe, and this is the outer
+# limit behind it. Assert a plausible seconds value — the unit is invisible in
+# the file itself, which is what let 10000 sit there reading as 10s.
+hook_timeout="$(jq -r '.hooks.PreToolUse[0].hooks[0].timeout' \
+  "$REPO_ROOT/hooks/hooks.json")"
+if [[ ! "$hook_timeout" =~ ^[0-9]+$ ]] || (( hook_timeout < 1 || hook_timeout > 600 )); then
+  printf 'hooks/hooks.json timeout is %s; must be seconds, 1..600\n' \
+    "${hook_timeout:-unset}" >&2
+  exit 1
+fi
+
 # Claude Code hands the hook native paths, so the fixtures must too. Under Git
 # Bash a path is `/d/a/repo/…`, which a native Python reads through ntpath —
 # where a leading slash is drive-relative, so the path lands on the hook

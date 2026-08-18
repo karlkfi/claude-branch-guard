@@ -1417,9 +1417,9 @@ def classify_segment(inv, branch, policy, cwd):
 def run_git(cwd, *args):
     """Run `git -C <cwd> <args>` and return the CompletedProcess, or None when
     git can't be run at all (missing binary, timeout). The 5s cap keeps a wedged
-    repo or stuck git from blocking the hook until Claude Code's 10s hook
-    timeout fires, degrading every tool call — a None answer makes every caller
-    fail safe."""
+    repo or stuck git from blocking the hook until the hook timeout in
+    hooks/hooks.json fires, degrading every tool call — a None answer makes
+    every caller fail safe."""
     try:
         return subprocess.run(['git', '-C', cwd] + list(args),
                               capture_output=True, text=True, timeout=5)
