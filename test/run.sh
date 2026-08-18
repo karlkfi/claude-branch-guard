@@ -1284,7 +1284,7 @@ printf '\n%d passed, %d failed\n' "$pass" "$fail"
 # silently collapses, because setup failed or a section exited early -- while
 # conflicting with nobody. Raise it when the suite grows a lot; nothing breaks
 # if it lags.
-CASE_FLOOR=280
+CASE_FLOOR=330
 counts_ok=1
 if [[ $((pass + fail)) -lt "$CASE_FLOOR" ]]; then
   printf 'suite ran %d cases, under the floor of %d — did setup fail, or a section exit early?\n' \
