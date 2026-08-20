@@ -136,6 +136,18 @@ reason_for() {
   fi
 }
 
+# context_for PAYLOAD CWD [NAME=value ...] -> echoes the additionalContext, or
+# "" when the decision carries none. `// empty` keeps an absent field from
+# printing "null", so a fixture asserting no context compares against "".
+context_for() {
+  local payload="$1" cwd="$2" out
+  shift 2
+  out="$( cd "$cwd" && printf '%s' "$payload" | env "$@" "$LAUNCHER" "$HOOK_SCRIPT" )"
+  if [[ -n "$out" ]]; then
+    printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext // empty'
+  fi
+}
+
 check() {
   local name="$1" expected="$2" actual="$3"
   if [[ "$expected" == "$actual" ]]; then
@@ -197,7 +209,7 @@ check_text "launcher says why it failed" has "script not found" "$launcher_err"
 bypasses="$(grep -nE '(^|[^-A-Za-z_])(python3?)([^-A-Za-z_]|$).*branch-guard\.py' \
   "$SCRIPT_DIR/run.sh" || true)"
 check "no fixture invokes the hook outside the launcher" "" "$bypasses"
-check "both hook helpers go through the launcher" 2 \
+check "all three hook helpers go through the launcher" 3 \
   "$(grep -c '"\$LAUNCHER" "\$HOOK_SCRIPT"' "$SCRIPT_DIR/run.sh")"
 
 #    Which half of the polyglot answered is itself a coverage claim, so pin it.
@@ -1823,6 +1835,41 @@ check "[overlap] a removed '-- ' line is content, not a file header -> ask" ask 
   "$(decision_for "$(push 'git push')" "$OVL")"
 check_text "[overlap] the hunk is filed under the real path" has "q.sql" \
   "$(reason_for "$(push 'git push')" "$OVL")"
+
+# 27n. `permissionDecisionReason` reaches the human at the prompt and stops
+#      there, so an approved push lands on the stale base with the session none
+#      the wiser. This verdict alone also returns `additionalContext`, which the
+#      model does see. Three controls pin that "alone", since a hook attaching a
+#      context to every ask would satisfy the positive cases on its own.
+make_overlap_repo claude/x file.txt 10 file.txt 10
+check_text "[overlap] the ask carries a context for the model" has \
+  "rebase before treating" "$(context_for "$(push 'git push')" "$OVL")"
+check_text "[overlap] the context names the base" has "origin/main" \
+  "$(context_for "$(push 'git push')" "$OVL")"
+check_text "[overlap] the context carries the rewrite" has \
+  "git fetch && git rebase origin/main" "$(context_for "$(push 'git push')" "$OVL")"
+check_text "[overlap] the context says the prompt is not the model's" has \
+  "goes to the user, not to you" "$(context_for "$(push 'git push')" "$OVL")"
+check "[overlap] the no-overlap control carries none" "" \
+  "$(context_for "$(push 'git push')" "$WORK")"
+check "[overlap] the unattended deny carries none" "" \
+  "$(context_for "$(push_mode 'git push' dontAsk)" "$OVL")"
+#      The sharpest of the three — same repo, same overlap, only the verdict
+#      differs, because the protected target is answered first.
+git -C "$OVL" switch -q main
+check "[overlap] the protected-target ask that wins carries none" "" \
+  "$(context_for "$(push 'git push origin main')" "$OVL")"
+git -C "$OVL" switch -q claude/x
+
+#      The chained form picks its reason from the first ask; the context has to
+#      come from the same verdict rather than from whichever segment asked.
+check_text "[overlap] the chained ask carries the context too" has \
+  "git rebase origin/main" "$(context_for "$(push 'git push && rm -rf foo')" "$OVL")"
+
+#      Two locks keep the break-glass off it: `push` is outside OVERRIDABLE_GIT,
+#      and `is_overridable` takes only a plain `ask`, which 'ask-rebase' is not.
+check "[overlap] the break-glass does not lift it" ask \
+  "$(decision_for "$(push 'BRANCH_GUARD_OVERRIDE=knowingly git push')" "$OVL")"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 

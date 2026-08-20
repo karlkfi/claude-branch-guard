@@ -1173,6 +1173,15 @@ def push_overlap_reason(base, paths):
             f"`git fetch && git rebase {base}` finds it now")
 
 
+def push_overlap_context(reason):
+    """The model-facing half of an overlap ask — see `confirm()` for why this
+    verdict has one and no other does. The cause names work for the model to do,
+    so it has to survive the human answering the prompt."""
+    return (f"branch-guard stopped this push to ask about a stale base: {reason}. "
+            f"The prompt goes to the user, not to you — so whichever way it is "
+            f"answered, rebase before treating this branch's merge as sound.")
+
+
 def skips_base(flags, short):
     """True if a push lands nothing on the base (`--dry-run`, `--delete`), so
     there is no overlap to have."""
@@ -1391,8 +1400,8 @@ def classify_reset(branch, cwd, probe):
 
 
 def classify_git(sub, args, branch, policy, cwd, probe):
-    """Verdict ('allow' | 'ask' | 'ask-shared' | 'defer', reason) for a
-    `git <sub>` command."""
+    """Verdict ('allow' | 'ask' | 'ask-shared' | 'ask-rebase' | 'defer', reason)
+    for a `git <sub>` command."""
     flags = {a for a in args if a.startswith('-')}
     short = short_flag_letters(args)
     pos = [a for a in args if not a.startswith('-')]
@@ -1424,7 +1433,7 @@ def classify_git(sub, args, branch, policy, cwd, probe):
         if decision == 'allow' and probe and not skips_base(flags, short):
             base, paths = push_overlap(cwd, branch)
             if paths:
-                return ('ask', push_overlap_reason(base, paths))
+                return ('ask-rebase', push_overlap_reason(base, paths))
         return (decision or 'defer', reason)
 
     # Harmless mutations — don't put work onto or rewrite a branch's history.
@@ -1672,10 +1681,12 @@ def is_overridable(inv, verdict, writes):
 
 
 def classify_segment(inv, branch, policy, cwd):
-    """Verdict ('nongit' | 'allow' | 'ask' | 'ask-shared' | 'defer', reason) for
-    one segment. 'nongit' marks a segment that isn't a git/gh invocation (so the
-    whole command can't be auto-approved); 'ask-shared' is an `ask` whose cause
-    is a protected branch, kept distinct so the break-glass can't lift it."""
+    """Verdict ('nongit' | 'allow' | 'ask' | 'ask-shared' | 'ask-rebase' |
+    'defer', reason) for one segment. 'nongit' marks a segment that isn't a
+    git/gh invocation (so the whole command can't be auto-approved);
+    'ask-shared' is an `ask` whose cause is a protected branch, kept distinct so
+    the break-glass can't lift it; 'ask-rebase' is an `ask` whose cause also has
+    to reach the model, so it emits an `additionalContext` alongside."""
     if inv is None:
         return ('nongit', None)
     if inv['prog'] == 'gh':
@@ -1875,15 +1886,18 @@ def is_protected(branch):
     return any(fnmatch.fnmatchcase(branch, p) for p in protected_patterns())
 
 
-def emit(decision, reason):
-    print(json.dumps({"hookSpecificOutput": {
+def emit(decision, reason, context=None):
+    out = {
         "hookEventName": "PreToolUse",
         "permissionDecision": decision,
         "permissionDecisionReason": reason,
-    }}))
+    }
+    if context:
+        out["additionalContext"] = context
+    print(json.dumps({"hookSpecificOutput": out}))
 
 
-def confirm(reason, mode, liftable=False):
+def confirm(reason, mode, liftable=False, context=None):
     """Emit `ask`, or `deny` when running in a non-interactive permission mode
     where no human is present to answer the prompt (fail safe).
 
@@ -1900,7 +1914,16 @@ def confirm(reason, mode, liftable=False):
     command, not just the offending segment — a hint on something that would be
     denied a second time is the same dead end the wording exists to avoid. The
     interactive `ask` never mentions the prefix: a human answering the prompt is
-    the shorter route, and advertising a bypass beside it is the wrong nudge."""
+    the shorter route, and advertising a bypass beside it is the wrong nudge.
+
+    `context` rides along on the `ask` only. `reason` reaches the human at the
+    prompt and stops there — measured on Claude Code 2.1.220, an `ask` uses it
+    as the prompt's text and nothing else, so a session whose command is
+    approved never learns what it was stopped for. `additionalContext` is the
+    channel that does reach the model, and it is queued while the hook's output
+    is read, before the prompt exists, so it lands whichever way the human
+    answers. The `deny` path needs none: a denial delivers `reason` to the model
+    already, and repeating it there would only say the same thing twice."""
     if mode in NON_INTERACTIVE_MODES:
         routes = (f"Retrying as-is won't help — re-run it prefixed with "
                   f"`{OVERRIDE_VAR}=<reason>` if the loss is deliberate, or do "
@@ -1912,7 +1935,7 @@ def confirm(reason, mode, liftable=False):
         emit('deny', f"{reason} — branch-guard denied it: permission mode "
                      f"'{mode}' has no way to prompt for confirmation. {routes}")
         return
-    emit('ask', f"{reason} — confirm before proceeding.")
+    emit('ask', f"{reason} — confirm before proceeding.", context)
 
 
 def main():
@@ -1986,8 +2009,9 @@ def main():
             if verdict == 'ask-shared':
                 confirm(reason, mode)
                 return
-        asks = [(reason, ovr) for verdict, reason, ovr in verdicts
-                if verdict == 'ask']
+        asks = [(reason, ovr, verdict == 'ask-rebase')
+                for verdict, reason, ovr in verdicts
+                if verdict in ('ask', 'ask-rebase')]
         if asks:
             # The break-glass lifts a local-loss ask, but only for a command
             # that is otherwise entirely recognized-safe: every other segment
@@ -1995,7 +2019,10 @@ def main():
             # substitution. Anything less and a second command would ride the
             # override in, which is the gap the all-segments rule closes for
             # `allow` and has to close here identically.
-            liftable = (all(ovr for _, ovr in asks)
+            # An 'ask-rebase' is never overridable (`is_overridable` takes only a
+            # plain 'ask', and `push` is outside OVERRIDABLE_GIT anyway), so its
+            # presence fails this on both clauses.
+            liftable = (all(ovr for _, ovr, _ in asks)
                         and all(v in ('allow', 'filter', 'benign', 'ask')
                                 for v, _, _ in verdicts)
                         and not has_shell_substitution(tokens))
@@ -2004,7 +2031,9 @@ def main():
                 emit('allow', f"{asks[0][0]} — {OVERRIDE_VAR} is set "
                               f"({override}), so branch-guard allowed it.")
                 return
-            confirm(asks[0][0], mode, liftable)
+            reason, _, rebase = asks[0]
+            confirm(reason, mode, liftable,
+                    push_overlap_context(reason) if rebase else None)
             return
         if all(verdict in ('allow', 'filter', 'benign') for verdict, _, _ in verdicts):
             # A hidden command substitution / process substitution / unrecognized

@@ -465,6 +465,15 @@ out wrong, and a merge queue would spend a whole check cycle finding that.
 `git fetch && git rebase origin/main` finds it now — confirm before proceeding.
 ```
 
+That reason reaches the person at the keyboard and stops there: on an `ask`,
+Claude Code uses it as the prompt's text and hands the model nothing. Approve,
+and the session pushes onto the stale base it was just told to rebase onto — the
+outcome the check exists to prevent, reached through a prompt somebody said yes
+to. So this verdict also returns the rebase as `additionalContext`, which does
+reach the model, and which Claude Code queues before the prompt is shown, so it
+lands whichever way the answer goes. It is the only verdict here that carries
+one: every other ask is settled by being answered.
+
 Both sides are diffed from the fork point, so both sets of line numbers are
 counted in that shared ancestor and can be compared at all. Hunks are read with
 `-U0` and widened by the three lines of context a hunk carries, so edits within
