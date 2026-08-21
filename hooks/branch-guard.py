@@ -431,19 +431,39 @@ HUNK_RE = re.compile(r'^@@ -([0-9]+)(?:,([0-9]+))? \+')
 # denies; `auto` asks.
 NON_INTERACTIVE_MODES = frozenset({'dontAsk', 'bypassPermissions'})
 
-# Opens every deny, ahead of the cause. A deny leaves no record in the decision
-# stream — Claude Code persists a hook's stdout only for a call it goes on to
-# run — so the error text handed back to the agent is the only trace it left,
-# and the opener is the only thing in that text saying which guard wrote it.
-# foreground-guard 0.5.1 reads it as a cross-guard contract, keyed on
+# Opens every ask and every deny, ahead of the cause. Claude Code attributes
+# neither to the plugin that wrote it, so this opener is the only part of the
+# text naming the guard — and with sibling guards installed alongside it, an
+# unattributed "Targets protected branch 'main'" tells the reader nothing about
+# who to answer, configure, or file against.
+#
+# The two paths need it for different reasons. A deny leaves no record in the
+# decision stream — Claude Code persists a hook's stdout only for a call it goes
+# on to run — so the error text handed back to the agent is the only trace it
+# left. An ask does leave a record, but the human is reading the permission
+# prompt rather than the record, and the prompt is the reason text alone. That
+# distinction is what #101's wording missed: `hookName` and the hook `command`
+# do attribute an ask, to whoever holds the decision stream, and the person the
+# ask is actually addressed to is not holding it.
+#
+# foreground-guard 0.5.1 reads the deny half as a cross-guard contract, keyed on
 # `^(?:Error:\s*)?([a-z0-9-]+-guard):\s` (its scripts/friction-report.py), so
 # the colon and the trailing space are both load-bearing and a guard wording
-# this differently under-counts its own denies under `--plugin all`. Applied
-# here rather than at the one call site that denies today, so the attribution
-# is a property of the wire format and a later deny cannot be added without it.
-# Asks are deliberately unprefixed: they are recorded as decisions, where
-# `hookName` and the hook `command` already attribute them.
-DENY_PREFIX = 'branch-guard: '
+# this differently under-counts its own denies under `--plugin all`. That regex
+# runs only over tool-result error text, so prefixing asks adds nothing to that
+# count: the same report reads an ask from the recorded decision and attributes
+# it by hook `command`, never by this opener.
+#
+# `allow` is deliberately excluded. It surfaces as neither prose channel — it
+# suppresses the prompt and is handed back to nobody — so it is read only by
+# something already holding the record that attributes it.
+#
+# Applied in `emit()` rather than at the call sites, so the attribution is a
+# property of the wire format and a later ask or deny cannot be added without it.
+GUARD_PREFIX = 'branch-guard: '
+
+# The verdicts GUARD_PREFIX opens: the two that reach a reader as prose.
+PREFIXED_DECISIONS = frozenset({'ask', 'deny'})
 
 # Break-glass command prefix: `BRANCH_GUARD_OVERRIDE=<reason> git clean -fd`.
 # Read from the COMMAND STRING, not the hook process environment, because that
@@ -1901,8 +1921,8 @@ def is_protected(branch):
 
 
 def emit(decision, reason, context=None):
-    if decision == 'deny':
-        reason = DENY_PREFIX + reason
+    if decision in PREFIXED_DECISIONS:
+        reason = GUARD_PREFIX + reason
     out = {
         "hookEventName": "PreToolUse",
         "permissionDecision": decision,
@@ -1923,8 +1943,9 @@ def confirm(reason, mode, liftable=False, context=None):
     says plainly that there is none — a denial worded "confirm before
     proceeding" reads as a prompt waiting to be answered, so an agent retries a
     command that cannot succeed in this session until it gives up. Name the
-    mode, and give the routes that do work. The guard names itself only once,
-    from `DENY_PREFIX` in `emit()`, which is why nothing here repeats it.
+    mode, and give the routes that do work. The guard names itself only once, in
+    `emit()`, which opens both paths with `GUARD_PREFIX` — so nothing here
+    repeats it on either.
 
     `liftable` says the break-glass would be honored for this exact command, so
     the denial names it. The caller passes it only after checking the whole
@@ -1940,7 +1961,13 @@ def confirm(reason, mode, liftable=False, context=None):
     channel that does reach the model, and it is queued while the hook's output
     is read, before the prompt exists, so it lands whichever way the human
     answers. The `deny` path needs none: a denial delivers `reason` to the model
-    already, and repeating it there would only say the same thing twice."""
+    already, and repeating it there would only say the same thing twice.
+
+    A context is not passed through `GUARD_PREFIX`; it names the guard in its own
+    prose instead, as `push_overlap_context` does. The prefix's shape is a
+    machine-readable key nothing parses on this field, and the field is a
+    paragraph rather than a one-line cause, so a new context should read as a
+    sentence naming branch-guard and not as a prefixed fragment."""
     if mode in NON_INTERACTIVE_MODES:
         routes = (f"Retrying as-is won't help — re-run it prefixed with "
                   f"`{OVERRIDE_VAR}=<reason>` if the loss is deliberate, or do "

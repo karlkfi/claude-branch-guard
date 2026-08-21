@@ -304,7 +304,7 @@ The two paths share the cause and differ in what they offer, so a denial is neve
 mistaken for a prompt that is waiting to be answered:
 
 ```
-ask   Push targets 'v1.3.0', not the worktree branch 'claude/x'
+ask   branch-guard: Push targets 'v1.3.0', not the worktree branch 'claude/x'
       — confirm before proceeding.
 
 deny  branch-guard: Push targets 'v1.3.0', not the worktree branch 'claude/x'
@@ -314,14 +314,17 @@ deny  branch-guard: Push targets 'v1.3.0', not the worktree branch 'claude/x'
       permission mode.
 ```
 
-Only the **deny** opens with `branch-guard: `. A deny leaves no record in Claude
-Code's decision stream — a hook's stdout is kept only for a call that goes on to
-run — so the error text handed back to the agent is the only trace it left, and
-that opener is the only part of it saying which guard wrote it. Sibling guards
-use the same shape, and foreground-guard's friction report reads it as a
-cross-guard key, so a guard wording it differently under-counts its own denies
-there. An **ask** needs no opener: it is recorded as a decision, where the hook
-name and the hook command already attribute it.
+Both open with `branch-guard: `. Claude Code names neither the plugin behind a
+permission prompt nor the one behind a denial, so that opener is the only part
+of the text saying which guard wrote it — and if you run several, an
+unattributed "Targets protected branch 'main'" leaves you no way to tell who is
+asking. Sibling guards use the same shape, and foreground-guard's friction
+report reads the deny half as a cross-guard key, so a guard wording it
+differently under-counts its own denies there.
+
+An **allow** carries no opener: it suppresses the prompt and is handed back to
+nobody, so the only thing that reads it is already holding the decision record
+that attributes it.
 
 The edit check resolves the branch of **the file's own repository**
 (`git -C <dir-of-file>`), not the session's working directory — so it catches an
@@ -468,10 +471,11 @@ validated the candidate and spent a whole check cycle on it. So the auto-approve
 is withdrawn and the push asks, naming the files and the fix:
 
 ```
-'origin/main' has moved since this branch left it, and its new commits edit the
-same lines this branch does in hooks/branch-guard.py — the merge is going to come
-out wrong, and a merge queue would spend a whole check cycle finding that.
-`git fetch && git rebase origin/main` finds it now — confirm before proceeding.
+branch-guard: 'origin/main' has moved since this branch left it, and its new
+commits edit the same lines this branch does in hooks/branch-guard.py — the merge
+is going to come out wrong, and a merge queue would spend a whole check cycle
+finding that. `git fetch && git rebase origin/main` finds it now — confirm before
+proceeding.
 ```
 
 That reason reaches the person at the keyboard and stops there: on an `ask`,
