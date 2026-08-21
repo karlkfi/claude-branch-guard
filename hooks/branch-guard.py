@@ -463,6 +463,9 @@ NON_INTERACTIVE_MODES = frozenset({'dontAsk', 'bypassPermissions'})
 GUARD_PREFIX = 'branch-guard: '
 
 # The verdicts GUARD_PREFIX opens: the two that reach a reader as prose.
+# `additionalContext` takes it unconditionally instead of by verdict — it rides
+# an ask only, and it is the one field that lands in the model's context with
+# nothing around it, so an unprefixed paragraph reads as the session's own.
 PREFIXED_DECISIONS = frozenset({'ask', 'deny'})
 
 # Break-glass command prefix: `BRANCH_GUARD_OVERRIDE=<reason> git clean -fd`.
@@ -1210,8 +1213,9 @@ def push_overlap_reason(base, paths):
 def push_overlap_context(reason):
     """The model-facing half of an overlap ask — see `confirm()` for why this
     verdict has one and no other does. The cause names work for the model to do,
-    so it has to survive the human answering the prompt."""
-    return (f"branch-guard stopped this push to ask about a stale base: {reason}. "
+    so it has to survive the human answering the prompt. The opener comes from
+    `emit()`, as it does for a reason, so nothing here names the guard."""
+    return (f"this push was stopped to ask about a stale base. {reason}. "
             f"The prompt goes to the user, not to you — so whichever way it is "
             f"answered, rebase before treating this branch's merge as sound.")
 
@@ -1252,14 +1256,14 @@ def overwrite_verdict(cwd, name, what, probe):
     if not probe:
         return ('ask', f"{what} can move an existing branch pointer, and a "
                        f"`git -C`/`--git-dir` option points at another "
-                       f"repository, so branch-guard can't check what "
+                       f"repository, so this guard can't check what "
                        f"'{name}' currently points at")
     exists = branch_exists(cwd, name)
     if exists is False:
         return ('allow', None)        # creates a new ref — nothing to overwrite
     if exists is None:
         return ('ask', f"{what} can move an existing branch pointer, and "
-                       f"branch-guard couldn't resolve '{name}'")
+                       f"this guard couldn't resolve '{name}'")
     rec = tip_is_recoverable(cwd, name)
     if rec is True:
         return ('allow', None)
@@ -1267,7 +1271,7 @@ def overwrite_verdict(cwd, name, what, probe):
         return ('ask', f"{what} moves existing branch '{name}', whose current "
                        f"tip isn't reachable from any remote-tracking branch "
                        f"or main")
-    return ('ask', f"{what} moves existing branch '{name}', and branch-guard "
+    return ('ask', f"{what} moves existing branch '{name}', and this guard "
                    f"couldn't check whether its current tip survives elsewhere")
 
 
@@ -1359,7 +1363,7 @@ def classify_branch(flags, short, pos, current, cwd, probe):
         if not probe:
             return ('ask', "`git branch -D` force-deletes a branch, and a "
                            "`git -C`/`--git-dir` option points at another "
-                           "repository, so branch-guard can't check whether "
+                           "repository, so this guard can't check whether "
                            "the commits survive elsewhere")
         # `-r` deletes a remote-tracking ref (`git branch -rD origin/x`). Such a
         # target sits under refs/remotes, so it satisfies the reachability check
@@ -1380,7 +1384,7 @@ def classify_branch(flags, short, pos, current, cwd, probe):
                                f"tip isn't reachable from any remote-tracking "
                                f"branch or main")
             return ('ask', f"`git branch -D` force-deletes '{b}', and "
-                           f"branch-guard couldn't check whether its commits "
+                           f"this guard couldn't check whether its commits "
                            f"survive elsewhere")
         return ('allow', None)
 
@@ -1423,7 +1427,7 @@ def classify_reset(branch, cwd, probe):
     if not probe:
         return ('ask', "`git reset --hard` discards changes, and a "
                        "`git -C`/`--git-dir` option points at another "
-                       "repository, so branch-guard can't check that one")
+                       "repository, so this guard can't check that one")
     if worktree_is_clean(cwd) is not True:
         return ('ask', "`git reset --hard` discards uncommitted changes to "
                        "tracked files")
@@ -1929,7 +1933,7 @@ def emit(decision, reason, context=None):
         "permissionDecisionReason": reason,
     }
     if context:
-        out["additionalContext"] = context
+        out["additionalContext"] = GUARD_PREFIX + context
     print(json.dumps({"hookSpecificOutput": out}))
 
 
@@ -1963,11 +1967,13 @@ def confirm(reason, mode, liftable=False, context=None):
     answers. The `deny` path needs none: a denial delivers `reason` to the model
     already, and repeating it there would only say the same thing twice.
 
-    A context is not passed through `GUARD_PREFIX`; it names the guard in its own
-    prose instead, as `push_overlap_context` does. The prefix's shape is a
-    machine-readable key nothing parses on this field, and the field is a
-    paragraph rather than a one-line cause, so a new context should read as a
-    sentence naming branch-guard and not as a prefixed fragment."""
+    A context opens with `GUARD_PREFIX` too, and takes it in `emit()` for the
+    same reason a reason does: the attribution belongs to the wire format rather
+    than to whichever helper built the paragraph. This is the one field that
+    lands in the model's context with nothing around it — no prompt, no tool
+    error — so an unprefixed paragraph is indistinguishable from the session's
+    own reasoning or from a sibling guard's. A builder like
+    `push_overlap_context` therefore names the guard nowhere else."""
     if mode in NON_INTERACTIVE_MODES:
         routes = (f"Retrying as-is won't help — re-run it prefixed with "
                   f"`{OVERRIDE_VAR}=<reason>` if the loss is deliberate, or do "

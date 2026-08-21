@@ -322,6 +322,12 @@ asking. Sibling guards use the same shape, and foreground-guard's friction
 report reads the deny half as a cross-guard key, so a guard wording it
 differently under-counts its own denies there.
 
+The push-overlap ask returns a second string, `additionalContext`, which reaches
+the model instead of the prompt — see [Push guard](#push-guard). It opens the
+same way, and for a sharper reason: that field arrives in the model's context
+with no prompt and no error around it, so an unprefixed paragraph is
+indistinguishable from the session's own reasoning.
+
 An **allow** carries no opener: it suppresses the prompt and is handed back to
 nobody, so the only thing that reads it is already holding the decision record
 that attributes it.

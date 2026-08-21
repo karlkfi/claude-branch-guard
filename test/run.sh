@@ -1908,14 +1908,13 @@ check_text "[overlap] the context carries the rewrite" has \
   "git fetch && git rebase origin/main" "$(context_for "$(push 'git push')" "$OVL")"
 check_text "[overlap] the context says the prompt is not the model's" has \
   "goes to the user, not to you" "$(context_for "$(push 'git push')" "$OVL")"
-#      The context attributes itself in prose rather than through GUARD_PREFIX:
-#      the prefix's shape is a machine-readable key nothing parses on this
-#      field, and this one is a paragraph rather than a one-line cause. Both
-#      halves are asserted, or "names the guard" would pass on a prefix and
-#      "carries no prefix" would pass on a context naming nobody at all.
-check_text "[overlap] the context names the guard in its own prose" has \
-  "branch-guard stopped this push" "$(context_for "$(push 'git push')" "$OVL")"
-check_text "[overlap] the context is not GUARD_PREFIX-shaped" lacks \
+#      The context opens with GUARD_PREFIX, as a reason does. It is the one
+#      field that lands in the model's context with nothing around it — no
+#      prompt, no tool error — so an unprefixed paragraph reads as the session's
+#      own or as a sibling guard's. Position is the whole assertion, and the
+#      four prose checks above are what stop it passing on a bare prefix; 11b's
+#      unprefixed allow is the control against "prefix everything".
+check_prefix "[overlap] the context opens with the guard prefix" \
   "branch-guard: " "$(context_for "$(push 'git push')" "$OVL")"
 check "[overlap] the no-overlap control carries none" "" \
   "$(context_for "$(push 'git push')" "$WORK")"
