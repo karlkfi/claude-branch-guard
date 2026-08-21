@@ -307,12 +307,21 @@ mistaken for a prompt that is waiting to be answered:
 ask   Push targets 'v1.3.0', not the worktree branch 'claude/x'
       — confirm before proceeding.
 
-deny  Push targets 'v1.3.0', not the worktree branch 'claude/x'
-      — branch-guard denied it: permission mode 'dontAsk' has no way to prompt
-      for confirmation. Retrying won't help — either do it outside this session
+deny  branch-guard: Push targets 'v1.3.0', not the worktree branch 'claude/x'
+      — denied because permission mode 'dontAsk' has no way to prompt for
+      confirmation. Retrying won't help — either do it outside this session
       (e.g. run the command in a terminal), or re-run in an interactive
       permission mode.
 ```
+
+Only the **deny** opens with `branch-guard: `. A deny leaves no record in Claude
+Code's decision stream — a hook's stdout is kept only for a call that goes on to
+run — so the error text handed back to the agent is the only trace it left, and
+that opener is the only part of it saying which guard wrote it. Sibling guards
+use the same shape, and foreground-guard's friction report reads it as a
+cross-guard key, so a guard wording it differently under-counts its own denies
+there. An **ask** needs no opener: it is recorded as a decision, where the hook
+name and the hook command already attribute it.
 
 The edit check resolves the branch of **the file's own repository**
 (`git -C <dir-of-file>`), not the session's working directory — so it catches an

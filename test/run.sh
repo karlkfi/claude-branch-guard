@@ -172,6 +172,21 @@ check_text() {
   fi
 }
 
+# check_prefix NAME PREFIX TEXT -> assert TEXT begins with PREFIX. Position is
+# the whole assertion here, so check_text cannot stand in for it: the deny
+# wording this replaced also contained "branch-guard", just not at the front,
+# where the cross-guard friction report's anchored pattern needs it.
+check_prefix() {
+  local name="$1" prefix="$2" text="$3"
+  if [[ "$text" == "$prefix"* ]]; then
+    printf 'ok   - %s\n' "$name"
+    pass=$((pass + 1))
+  else
+    printf 'FAIL - %s: expected reason to start with %q, got: %s\n' "$name" "$prefix" "$text"
+    fail=$((fail + 1))
+  fi
+}
+
 # edit_payload TOOL KEY PATH [CWD] [MODE] -> an edit-tool payload as JSON. PATH
 # and CWD arrive in native form and jq json-encodes them, so a Windows path's
 # backslashes survive the trip instead of reading as JSON escapes.
@@ -586,6 +601,26 @@ check_text "[bypassPermissions] tag push deny names its own mode" has \
   "permission mode 'bypassPermissions'" \
   "$(reason_for "$(push_mode 'git push origin v1.3.0' 'bypassPermissions')" "$WORK")"
 
+# 11b. Every deny opens `branch-guard: `, ahead of the cause. A deny leaves no
+#      record in the decision stream, so the error text handed back to the agent
+#      is its only trace, and foreground-guard 0.5.1 keys its cross-guard
+#      friction report on that opener (`^(?:Error:\s*)?([a-z0-9-]+-guard):\s`,
+#      scripts/friction-report.py). Naming the guard mid-string, as this once
+#      did, does not match an anchored pattern, so every deny here went
+#      uncounted under `--plugin all`. The prefix is applied in `emit()`, so
+#      these cover the wire format rather than one call site.
+check_prefix "[dontAsk] tag push deny opens with the guard's name" \
+  "branch-guard: Push targets 'v1.3.0'" "$tag_deny"
+check_prefix "[bypassPermissions] deny opens with the guard's name too" \
+  "branch-guard: " \
+  "$(reason_for "$(push_mode 'git push origin v1.3.0' 'bypassPermissions')" "$WORK")"
+# Asks stay unprefixed on purpose: they are recorded as decisions, where
+# `hookName` and the hook `command` already attribute them. Without this the
+# suite would pass just as happily with the prefix on every reason, which is a
+# different contract from the one foreground-guard parses.
+check_text "[default] tag push ask carries no guard prefix" lacks \
+  "branch-guard: " "$tag_ask"
+
 # The same wording split applies to every ask site, not just pushes.
 git -C "$WORK" checkout -q main
 check_text "[dontAsk] commit-on-main deny is not confirm-shaped" lacks "confirm before proceeding" \
@@ -596,9 +631,18 @@ check_text "[auto] edit-on-main ask invites confirmation" has "— confirm befor
   "$(reason_for "$(edit_payload Edit file_path "$WORK/file.txt" "" auto)" "$WORK")"
 check_text "[default] edit-on-main ask invites confirmation" has "— confirm before proceeding." \
   "$(reason_for "$(edit_payload Edit file_path "$WORK/file.txt" "" default)" "$WORK")"
+# The prefix reaches the commit and edit paths, not just the push one — the
+# three are separate `confirm()` call sites and only the wire format is shared.
+check_prefix "[dontAsk] commit-on-main deny opens with the guard's name" \
+  "branch-guard: " "$(reason_for "$(push_mode 'git commit -m x' 'dontAsk')" "$WORK")"
+check_prefix "[dontAsk] edit-on-main deny opens with the guard's name" \
+  "branch-guard: " \
+  "$(reason_for "$(edit_payload Edit file_path "$WORK/file.txt" "" dontAsk)" "$WORK")"
+check_text "[auto] edit-on-main ask carries no guard prefix" lacks "branch-guard: " \
+  "$(reason_for "$(edit_payload Edit file_path "$WORK/file.txt" "" auto)" "$WORK")"
 git -C "$WORK" checkout -q claude/x
 
-# 11b. detached HEAD resolves to no branch, so the hook defers (even though the
+# 11c. detached HEAD resolves to no branch, so the hook defers (even though the
 #      detached commit is really main's) — `rev-parse --abbrev-ref` would print
 #      "HEAD" and mis-treat it as an ordinary feature branch.
 git -C "$WORK" checkout -q --detach

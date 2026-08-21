@@ -431,6 +431,20 @@ HUNK_RE = re.compile(r'^@@ -([0-9]+)(?:,([0-9]+))? \+')
 # denies; `auto` asks.
 NON_INTERACTIVE_MODES = frozenset({'dontAsk', 'bypassPermissions'})
 
+# Opens every deny, ahead of the cause. A deny leaves no record in the decision
+# stream — Claude Code persists a hook's stdout only for a call it goes on to
+# run — so the error text handed back to the agent is the only trace it left,
+# and the opener is the only thing in that text saying which guard wrote it.
+# foreground-guard 0.5.1 reads it as a cross-guard contract, keyed on
+# `^(?:Error:\s*)?([a-z0-9-]+-guard):\s` (its scripts/friction-report.py), so
+# the colon and the trailing space are both load-bearing and a guard wording
+# this differently under-counts its own denies under `--plugin all`. Applied
+# here rather than at the one call site that denies today, so the attribution
+# is a property of the wire format and a later deny cannot be added without it.
+# Asks are deliberately unprefixed: they are recorded as decisions, where
+# `hookName` and the hook `command` already attribute them.
+DENY_PREFIX = 'branch-guard: '
+
 # Break-glass command prefix: `BRANCH_GUARD_OVERRIDE=<reason> git clean -fd`.
 # Read from the COMMAND STRING, not the hook process environment, because that
 # is the only form a session can set per command — a PreToolUse hook inherits
@@ -1887,6 +1901,8 @@ def is_protected(branch):
 
 
 def emit(decision, reason, context=None):
+    if decision == 'deny':
+        reason = DENY_PREFIX + reason
     out = {
         "hookEventName": "PreToolUse",
         "permissionDecision": decision,
@@ -1907,7 +1923,8 @@ def confirm(reason, mode, liftable=False, context=None):
     says plainly that there is none — a denial worded "confirm before
     proceeding" reads as a prompt waiting to be answered, so an agent retries a
     command that cannot succeed in this session until it gives up. Name the
-    mode, and give the routes that do work.
+    mode, and give the routes that do work. The guard names itself only once,
+    from `DENY_PREFIX` in `emit()`, which is why nothing here repeats it.
 
     `liftable` says the break-glass would be honored for this exact command, so
     the denial names it. The caller passes it only after checking the whole
@@ -1932,8 +1949,8 @@ def confirm(reason, mode, liftable=False, context=None):
                   "Retrying won't help — either do it outside this session "
                   "(e.g. run the command in a terminal), or re-run in an "
                   "interactive permission mode.")
-        emit('deny', f"{reason} — branch-guard denied it: permission mode "
-                     f"'{mode}' has no way to prompt for confirmation. {routes}")
+        emit('deny', f"{reason} — denied because permission mode '{mode}' has "
+                     f"no way to prompt for confirmation. {routes}")
         return
     emit('ask', f"{reason} — confirm before proceeding.", context)
 
